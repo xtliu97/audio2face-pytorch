@@ -2,7 +2,7 @@ import os
 import pickle
 from typing import TypedDict, List, Mapping, Literal, Tuple
 from typing_extensions import Unpack
-from dataclasses import dataclass
+import dataclasses
 
 from rich.progress import Progress, track
 from rich import print
@@ -29,44 +29,40 @@ VOCASET_VERTS_TYPE = np.ndarray
 VOCASET_SUBJ_SEQ_TO_IDX_TYPE = Mapping[str, Mapping[str, Mapping[int, int]]]
 
 training_subject = [
-        "FaceTalk_170728_03272_TA",
-        "FaceTalk_170904_00128_TA",
-        "FaceTalk_170725_00137_TA",
-        "FaceTalk_170915_00223_TA",
-        "FaceTalk_170811_03274_TA",
-        "FaceTalk_170913_03279_TA",
-        "FaceTalk_170904_03276_TA",
-        "FaceTalk_170912_03278_TA",
-    ]
-training_sentence = [
-        f"sentence{i:02d}" for i in range(1, 41)
-    ]
+    "FaceTalk_170728_03272_TA",
+    "FaceTalk_170904_00128_TA",
+    "FaceTalk_170725_00137_TA",
+    "FaceTalk_170915_00223_TA",
+    "FaceTalk_170811_03274_TA",
+    "FaceTalk_170913_03279_TA",
+    "FaceTalk_170904_03276_TA",
+    "FaceTalk_170912_03278_TA",
+]
+training_sentence = [f"sentence{i:02d}" for i in range(1, 41)]
 validation_subject = [
-        "FaceTalk_170811_03275_TA",
-        "FaceTalk_170908_03277_TA",
-    ]
-validation_sentence = [
-        f"sentence{i:02d}" for i in range(21, 41)
-    ]
+    "FaceTalk_170811_03275_TA",
+    "FaceTalk_170908_03277_TA",
+]
+validation_sentence = [f"sentence{i:02d}" for i in range(21, 41)]
 
 
-@dataclass
-class FrameData():
+@dataclasses.dataclass
+class FrameData:
     human_id: str
     sentence_id: str
     seq_num: int
     audio: np.ndarray
     verts: np.ndarray
     feature: np.ndarray
-    
+
     def __repr__(self) -> str:
         return f"""FrameData(
-    human_id={self.human_id},
-    sentence_id={self.sentence_id},
-    seq_num={self.seq_num},
-    audio: {self.audio.shape},
-    verts: {self.verts.shape},
-    feature: {self.feature.shape}
+human_id={self.human_id},
+sentence_id={self.sentence_id},
+seq_num={self.seq_num},
+audio: {self.audio.shape},
+verts: {self.verts.shape},
+feature: {self.feature.shape}
 )    
 """
 
@@ -90,19 +86,20 @@ def get_audio_fragment(
         return None
     return pad_audio[start:end]
 
+
 import lmdb
 
 
 class IndexDataset(Dataset):
     def __init__(self, base_path, write=False):
-        self.__init_failed = True # for __del__
+        self.__init_failed = True  # for __del__
         db_path = os.path.join(base_path, "framedata")
         if write and os.path.exists(db_path):
             raise FileExistsError(f"DB {db_path} already exists")
-        
+
         if not write and not os.path.exists(db_path):
             raise FileNotFoundError(f"DB {db_path} not found")
-        
+
         self.__init_failed = False
 
         self._write = write
@@ -110,7 +107,7 @@ class IndexDataset(Dataset):
         self._base_path = base_path
         self._env = lmdb.open(db_path, map_size=1024 * 1024 * 1024 * 1024)
         self._cnt = self._env.stat()["entries"]
-        
+
         if write:
             self._trainset_indexes = []
             self._valset_indexes = []
@@ -119,11 +116,11 @@ class IndexDataset(Dataset):
             self._trainset_indexes = self.__load_split_indices("train")
             self._valset_indexes = self.__load_split_indices("val")
             self._testset_indexes = self.__load_split_indices("test")
-            
+
     @property
     def path(self):
         return self._base_path
-            
+
     def ascii_key(self, key) -> bytes:
         return f"{key:08d}".encode("ascii")
 
@@ -132,36 +129,41 @@ class IndexDataset(Dataset):
         assert self._write, "DB is not open for writing"
         with self._env.begin(write=True) as txn:
             txn.put(self.ascii_key(self._cnt), pickle.dumps(frame_data))
-        if frame_data.human_id in training_subject and frame_data.sentence_id in training_sentence:
+        if (
+            frame_data.human_id in training_subject
+            and frame_data.sentence_id in training_sentence
+        ):
             self._trainset_indexes.append(self._cnt)
-        elif frame_data.human_id in validation_subject and frame_data.sentence_id in validation_sentence:
+        elif (
+            frame_data.human_id in validation_subject
+            and frame_data.sentence_id in validation_sentence
+        ):
             self._valset_indexes.append(self._cnt)
         else:
             self._testset_indexes.append(self._cnt)
         self._cnt += 1
-    
+
     def __save_split_indices(self, phase_name, indexes):
         filename = os.path.join(self._db_path, f"{phase_name}_splits.txt")
         with open(filename, "w") as f:
             f.write("\n".join(map(str, indexes)))
         print(f"Saved {phase_name} split indices to {filename}")
-        
+
     def __load_split_indices(self, phase_name) -> List[int]:
         filename = os.path.join(self._db_path, f"{phase_name}_splits.txt")
-        with open (filename, "r") as f:
+        with open(filename, "r") as f:
             return list(map(int, f.readlines()))
-        
-    
+
     def close(self):
         if self.__init_failed:
             return
-        
+
         if self._write:
             self.__save_split_indices("train", self._trainset_indexes)
             self.__save_split_indices("val", self._valset_indexes)
             self.__save_split_indices("test", self._testset_indexes)
         self._env.close()
-            
+
     def __del__(self):
         self.close()
 
@@ -171,7 +173,7 @@ class IndexDataset(Dataset):
     def __getitem__(self, index) -> FrameData:
         with self._env.begin() as txn:
             return pickle.loads(txn.get(self.ascii_key(index)))
-    
+
     def read_only(self):
         return IndexDataset(self.path, write=False)
 
@@ -205,7 +207,9 @@ def build_frame_data(
         save_path = os.path.dirname(__file__)
     dataset = IndexDataset(save_path, write=True)
     n_all, n_success = 0, 0
-    total_audio_idx = pre_fetch_length(data_verts, raw_audio, subj_seq_to_idx) # for progress bar
+    total_audio_idx = pre_fetch_length(
+        data_verts, raw_audio, subj_seq_to_idx
+    )  # for progress bar
 
     with Progress() as pbar:
         task = pbar.add_task("[green]Processing...")
@@ -213,7 +217,9 @@ def build_frame_data(
             range(len(raw_audio)), raw_audio.keys(), raw_audio.values()
         ):
             pbar.update(
-                task, description=f"Processing {clip_name} {i}/{len(raw_audio)}", total=total_audio_idx
+                task,
+                description=f"Processing {clip_name} {i}/{len(raw_audio)}",
+                total=total_audio_idx,
             )
             # print(f"Processing {clip_name} with {len(clip_data)} sentences")
             subtask = pbar.add_task(f"Processing {clip_name}", total=len(clip_data))
@@ -279,7 +285,11 @@ def build_dataset(src_datapath: str, dst_datapath: str = None) -> str:
     deepspeech_feature = load_pickle(deepspeech_feature_path)
     #  frame data
     frame_dataset = build_frame_data(
-        data_verts, raw_audio, subj_seq_to_idx, deepspeech_feature, save_path=dst_datapath
+        data_verts,
+        raw_audio,
+        subj_seq_to_idx,
+        deepspeech_feature,
+        save_path=dst_datapath,
     )
     # print(f"Loaded {len(self._frame_data)} frame data")
 
@@ -287,8 +297,10 @@ def build_dataset(src_datapath: str, dst_datapath: str = None) -> str:
     return frame_dataset.path
 
 
-class VocaSet(Dataset):    
-    def __init__(self, datapath: str, phase: Literal["train", "val", "test", "all"] = "all"):
+class VocaSet(Dataset):
+    def __init__(
+        self, datapath: str, phase: Literal["train", "val", "test", "all"] = "all"
+    ):
         self.datapath = os.path.abspath(datapath)
         self._frame_data = IndexDataset(self.datapath, write=False)
         self._phase = phase
@@ -302,36 +314,31 @@ class VocaSet(Dataset):
             self._indices = self._frame_data._testset_indexes
         else:
             raise ValueError(f"Invalid phase {phase}")
-        
+
     def __len__(self):
         return len(self._indices)
 
     def __getitem__(self, index):
         return self._frame_data[self._indices[index]]
-    
-    
+
+
 def check_dataset(dataset: VocaSet):
-    print(f"Loaded {len(dataset)} frame data")
-    for data in track(dataset):
+    for data in track(
+        dataset, description=f"Checking dataset phase={dataset._phase}..."
+    ):
         _ = data
     print(f"{len(dataset)} frame data of phase {dataset._phase} loaded")
-        
 
 
 if __name__ == "__main__":
-    dataset_path = "../"
-    # dataset_path = build_dataset("/Users/xiaotianliu/Downloads/trainingdata/", "/Users/xiaotianliu/work/VOCA-Pytorch/")
-    # print(f"Dataset saved to {dataset_path}")
-    # dataset = VocaSet(dataset_path)
-    # print(len(dataset))
-    # trainset = VocaSet( '/Users/xiaotianliu/work/VOCA-Pytorch/dataset/', phase="train")
-    # print(len(trainset))
-    # valset = VocaSet( '/Users/xiaotianliu/work/VOCA-Pytorch/dataset/', phase="val")
-    # check_dataset("train")
-    # check_dataset("val")
-    check_dataset(VocaSet(dataset_path, phase="all"))
-    check_dataset(VocaSet(dataset_path, phase="train"))
-    check_dataset(VocaSet(dataset_path, phase="val"))
-    check_dataset(VocaSet(dataset_path, phase="test"))
-    
+    source_datapath = os.path.join(os.getcwd(), "../../Downloads/trainingdata/")
+    dataset_path = os.getcwd()
 
+    # build dataset
+    # build_dataset(source_datapath, dataset_path)
+
+    # load dataset
+    dataset = VocaSet(dataset_path)
+
+    # check dataset
+    check_dataset(dataset)
