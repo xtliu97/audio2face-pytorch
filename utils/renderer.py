@@ -1,11 +1,9 @@
-from functools import cached_property
 import time
 
+import cv2
 import pyrender
 import numpy as np
-import cv2
 from rich.progress import track
-
 
 from .facemesh import FaceMesh
 
@@ -21,26 +19,9 @@ class Renderer:
         self.frustum = {"near": 0.01, "far": 3.0, "height": 800, "width": 800}
         self.z_offset = 0.0
         self.intensity = 1.5
+        self.renderer = self.build_renderer()
 
-    def _render(self, verts, queue=None):
-        scene = self.scene
-        render_mesh = self.texture_mesh.copy()
-        render_mesh.set_verts(verts)
-        render_mesh = pyrender.Mesh.from_trimesh(render_mesh.trimesh(), smooth=True)
-        scene.add(render_mesh, pose=np.eye(4))
-
-        renderer = self.renderer
-        rendered_image, _ = renderer.render(
-            scene, flags=pyrender.RenderFlags.SKIP_CULL_FACES
-        )
-
-        if queue is not None:
-            queue.put(rendered_image)
-
-        return rendered_image
-
-    @cached_property
-    def scene(self) -> "pyrender.Scene":
+    def build_scene(self) -> pyrender.Scene:
         scene = pyrender.Scene(ambient_light=[0.2, 0.2, 0.2], bg_color=[255, 255, 255])
         camera = pyrender.IntrinsicsCamera(
             fx=self.camera_params["f"][0],
@@ -52,7 +33,15 @@ class Renderer:
         )
         camera_pose = np.eye(4)
         camera_pose[:3, 3] = np.array([0, 0, 1.0 - self.z_offset])
-        scene.add(camera, pose=[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]])
+        scene.add(
+            camera,
+            pose=[
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 0, 1, 1],
+                [0, 0, 0, 1],
+            ],
+        )
 
         angle = np.pi / 6.0
         pos = camera_pose[:3, 3]
@@ -78,11 +67,24 @@ class Renderer:
 
         return scene
 
-    @cached_property
-    def renderer(self):
+    def build_renderer(self) -> pyrender.OffscreenRenderer:
         return pyrender.OffscreenRenderer(
-            viewport_width=self.frustum["width"], viewport_height=self.frustum["height"]
+            viewport_width=self.frustum["width"],
+            viewport_height=self.frustum["height"],
         )
+
+    def _render_frame(self, verts) -> np.ndarray:
+        scene = self.build_scene()
+        render_mesh = self.texture_mesh.copy()
+        render_mesh.set_verts(verts)
+        render_mesh = pyrender.Mesh.from_trimesh(render_mesh.trimesh(), smooth=True)
+        scene.add(render_mesh, pose=np.eye(4))
+
+        rendered_image, _ = self.renderer.render(
+            scene, flags=pyrender.RenderFlags.SKIP_CULL_FACES
+        )
+
+        return rendered_image
 
     def render(self, target_verts: np.ndarray):
         n_frames = target_verts.shape[0]
@@ -91,9 +93,9 @@ class Renderer:
         prev_rendered_image = None
         rendered_images = []
         n_success = 0
-        for idx in track(range(n_frames)):
+        for target_vert in track(target_verts, description="Rendering frames..."):
             try:
-                rendered_image = self._render(target_verts[idx])
+                rendered_image = self._render_frame(target_vert)
                 n_success += 1
             except Exception as e:
                 print("Failed rendering frame" + str(e))
@@ -102,5 +104,16 @@ class Renderer:
                 prev_rendered_image = rendered_image
                 rendered_images.append(rendered_image)
         toc = time.time()
-        print(f"Rendering took {toc - tic:.2f}s, success  {n_success} / {n_frames}")
+        print(
+            f"Rendered {n_success}/{n_frames} frames in {toc - tic:.2f}s, avg: {(toc - tic) / n_success:.2f}s/frame"
+        )
         return rendered_images
+
+def images_to_video(images: list, output: str, fps: int = 60):
+    height, width, _ = images[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    video = cv2.VideoWriter(output, fourcc, fps, (width, height))
+    for img in track(images, description="Writing frames to video..."):
+        video.write(img)
+    video.release()
+    
