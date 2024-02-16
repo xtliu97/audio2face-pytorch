@@ -109,6 +109,7 @@ class Renderer:
         )
         return rendered_images
 
+
 def images_to_video(images: list, output: str, fps: int = 60):
     height, width, _ = images[0].shape
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -116,4 +117,3 @@ def images_to_video(images: list, output: str, fps: int = 60):
     for img in track(images, description="Writing frames to video..."):
         video.write(img)
     video.release()
-    
