@@ -4,14 +4,14 @@ from typing import TypedDict, List, Mapping, Literal, Tuple
 from typing_extensions import Unpack
 import dataclasses
 
+import lmdb
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
 from rich.progress import Progress, track
 from rich import print
 
-from cached_property import cached_property
 
-import torch
-import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from .extractor import MelSpectrogramExtractor
 
 
 def load_pickle(pkl_path):
@@ -57,12 +57,12 @@ class FrameData:
 
     def __repr__(self) -> str:
         return f"""FrameData(
-human_id={self.human_id},
-sentence_id={self.sentence_id},
-seq_num={self.seq_num},
-audio: {self.audio.shape},
-verts: {self.verts.shape},
-feature: {self.feature.shape}
+    human_id={self.human_id},
+    sentence_id={self.sentence_id},
+    seq_num={self.seq_num},
+    audio: {self.audio.shape},
+    verts: {self.verts.shape},
+    feature: {self.feature.shape}
 )    
 """
 
@@ -85,9 +85,6 @@ def get_audio_fragment(
         print(f"Audio is not long enough to get fragment: {end} > {len(pad_audio)}")
         return None
     return pad_audio[start:end]
-
-
-import lmdb
 
 
 class IndexDataset(Dataset):
@@ -199,7 +196,7 @@ def build_frame_data(
     subj_seq_to_idx: VOCASET_SUBJ_SEQ_TO_IDX_TYPE,
     deepspeech_feature,
     *,
-    max_num: int | None = 1000,
+    max_num: int | None = None,
     save_path: str | None = None,
 ) -> IndexDataset:
     # frame_data = []
@@ -210,16 +207,22 @@ def build_frame_data(
     total_audio_idx = pre_fetch_length(
         data_verts, raw_audio, subj_seq_to_idx
     )  # for progress bar
-
+    T = MelSpectrogramExtractor(
+        sample_rate=22000,
+        n_mel=32,
+        win_length=176 * 2,
+        hop_length=176,
+        n_fft=1024,
+        normalize=True,
+    )
     with Progress() as pbar:
-        task = pbar.add_task("[green]Processing...")
+        task = pbar.add_task("[green]Processing...", total=total_audio_idx)
         for i, clip_name, clip_data in zip(
             range(len(raw_audio)), raw_audio.keys(), raw_audio.values()
         ):
             pbar.update(
                 task,
                 description=f"Processing {clip_name} {i}/{len(raw_audio)}",
-                total=total_audio_idx,
             )
             # print(f"Processing {clip_name} with {len(clip_data)} sentences")
             subtask = pbar.add_task(f"Processing {clip_name}", total=len(clip_data))
@@ -242,7 +245,8 @@ def build_frame_data(
                         length=0.52,
                         fps=60,
                     )
-                    feature = deepspeech_feature[clip_name][sentence_id]["audio"][idx]
+                    # feature = deepspeech_feature[clip_name][sentence_id]["audio"][idx]
+                    feature = T(audio_frag)
                     n_all += 1
                     if audio_frag is None:
                         continue
@@ -320,25 +324,3 @@ class VocaSet(Dataset):
 
     def __getitem__(self, index):
         return self._frame_data[self._indices[index]]
-
-
-def check_dataset(dataset: VocaSet):
-    for data in track(
-        dataset, description=f"Checking dataset phase={dataset._phase}..."
-    ):
-        _ = data
-    print(f"{len(dataset)} frame data of phase {dataset._phase} loaded")
-
-
-if __name__ == "__main__":
-    source_datapath = os.path.join(os.getcwd(), "../../Downloads/trainingdata/")
-    dataset_path = os.getcwd()
-
-    # build dataset
-    # build_dataset(source_datapath, dataset_path)
-
-    # load dataset
-    dataset = VocaSet(dataset_path)
-
-    # check dataset
-    check_dataset(dataset)
