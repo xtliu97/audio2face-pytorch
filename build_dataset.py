@@ -1,22 +1,10 @@
 import os
-import pickle
-from typing import TypedDict, List, Mapping, Literal, Tuple
-from typing_extensions import Unpack
-import dataclasses
 
-from rich.progress import Progress, track
+from rich.progress import track
 from rich import print
 
-import lmdb
-from cached_property import cached_property
-import matplotlib.pyplot as plt
-import librosa
-
-import torch
-import torchaudio
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
-
+import matplotlib.pyplot as plt
 
 from dataset.vocaset import VocaSet, build_dataset
 
@@ -34,15 +22,19 @@ if __name__ == "__main__":
     dataset_path = os.getcwd()
 
     # build dataset
-    build_dataset(source_datapath, dataset_path)
+    # build_dataset(source_datapath, dataset_path)
 
     # load dataset
     dataset = VocaSet(dataset_path)
 
     # random vis
-    idx = np.random.randint(len(dataset))
-    print(dataset[idx])
-    fig, axs = plt.subplots(2, 1)
+    for data in dataset:
+        print(data)
+        break
+
+    # get frame data
+    frames = dataset.get_framedatas("FaceTalk_170725_00137_TA", "sentence28")
+    print(len(frames))
 
     # check dataset
     # check_dataset(dataset)
