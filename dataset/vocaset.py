@@ -130,14 +130,20 @@ class IndexDataset(Dataset):
             frame_data.human_id in training_subject
             and frame_data.sentence_id in training_sentence
         ):
-            self._trainset_indexes.append(self._cnt)
+            self._trainset_indexes.append(
+                f"{self._cnt} {frame_data.human_id} {frame_data.sentence_id}"
+            )
         elif (
             frame_data.human_id in validation_subject
             and frame_data.sentence_id in validation_sentence
         ):
-            self._valset_indexes.append(self._cnt)
+            self._valset_indexes.append(
+                f"{self._cnt} {frame_data.human_id} {frame_data.sentence_id}"
+            )
         else:
-            self._testset_indexes.append(self._cnt)
+            self._testset_indexes.append(
+                f"{self._cnt} {frame_data.human_id} {frame_data.sentence_id}"
+            )
         self._cnt += 1
 
     def __save_split_indices(self, phase_name, indexes):
@@ -149,7 +155,7 @@ class IndexDataset(Dataset):
     def __load_split_indices(self, phase_name) -> List[int]:
         filename = os.path.join(self._db_path, f"{phase_name}_splits.txt")
         with open(filename, "r") as f:
-            return list(map(int, f.readlines()))
+            return list(map(str, f.read().split("\n")))
 
     def close(self):
         if self.__init_failed:
@@ -309,7 +315,11 @@ class VocaSet(Dataset):
         self._frame_data = IndexDataset(self.datapath, write=False)
         self._phase = phase
         if phase == "all":
-            self._indices = list(range(len(self._frame_data)))
+            self._indices = [
+                *self._frame_data._trainset_indexes,
+                *self._frame_data._valset_indexes,
+                *self._frame_data._testset_indexes,
+            ]
         elif phase == "train":
             self._indices = self._frame_data._trainset_indexes
         elif phase == "val":
@@ -323,4 +333,13 @@ class VocaSet(Dataset):
         return len(self._indices)
 
     def __getitem__(self, index):
-        return self._frame_data[self._indices[index]]
+        idx = int(self._indices[index].split()[0])
+        return self._frame_data[idx]
+
+    def get_framedatas(self, target_human_id: str, target_sentence_id: str):
+        res = []
+        for idx in self._indices:
+            i, human_id, sentence_id = idx.split()
+            if human_id == target_human_id and sentence_id == target_sentence_id:
+                res.append(self._frame_data[int(i)])
+        return res
