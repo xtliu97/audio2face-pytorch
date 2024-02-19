@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import pytorch_lightning as pl
 
 
 class AutoCorrelation(nn.Module):
@@ -8,6 +9,17 @@ class AutoCorrelation(nn.Module):
         x = x / (torch.norm(x, dim=1, keepdim=True) + 1e-8)
         x = torch.matmul(x, x.transpose(1, 2))
         return x
+
+
+class PaperLoss:
+    def __call__(self, pred, gt):
+        loss_p = torch.mean((pred - gt) ** 2)
+        split_pred = torch.split(pred, 2, dim=0)
+        split_gt = torch.split(gt, 2, dim=0)
+        loss_m = 2 * torch.mean(
+            (split_pred[0] - split_pred[1] - (split_gt[0] - split_gt[1])) ** 2
+        )
+        return loss_p + loss_m
 
 
 class Audio2Face(nn.Module):
@@ -53,6 +65,37 @@ class Audio2Face(nn.Module):
         x = self.output_net(x)
         return x
 
+
+class Audio2FaceModel(pl.LightningModule):
+    def __init__(self, out_nums: int = 5023 * 3):
+        super(Audio2FaceModel, self).__init__()
+        self.model = Audio2Face(out_nums)
+        self.criterion = PaperLoss()
+
+    def forward(self, x):
+        return self.model(x)
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        pred = self.model(x)
+        loss = self.criterion(pred, y)
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        pred = self.model(x)
+        loss = self.criterion(pred, y)
+        self.log("val_loss", loss)
+        return loss
+
+    def on_validation_epoch_end(self) -> None:
+        print(f"val_loss: {self.trainer.callback_metrics['val_loss']}")
+
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        return optimizer  
 
 if __name__ == "__main__":
     model = Audio2Face()

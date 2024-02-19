@@ -26,15 +26,20 @@ if __name__ == "__main__":
 
     # load dataset
     dataset = VocaSet(dataset_path)
+    print(len(dataset))
 
     # random vis
-    for data in dataset:
-        print(data)
-        break
+    for i, data in enumerate(dataset):
+        if i == 1000:
+            print(data)
+            print(data.verts)
+            print(data.feature)
+            break
 
     # get frame data
-    frames = dataset.get_framedatas("FaceTalk_170725_00137_TA", "sentence28")
+    frames = dataset.get_framedatas("FaceTalk_170904_00128_TA", "sentence06")
     print(len(frames))
+    
 
     # check dataset
     # check_dataset(dataset)

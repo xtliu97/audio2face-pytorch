@@ -2,11 +2,15 @@ import os
 import pickle
 from typing import TypedDict, List, Mapping, Literal, Tuple
 from typing_extensions import Unpack
+from copy import deepcopy
 import dataclasses
 
 import lmdb
 import numpy as np
+import torch
+from pytorch_lightning.utilities.types import TRAIN_DATALOADERS
 from torch.utils.data import Dataset, DataLoader
+import pytorch_lightning as pl
 from rich.progress import Progress, track
 from rich import print
 
@@ -88,6 +92,12 @@ def get_audio_fragment(
 
 
 class IndexDataset(Dataset):
+    def open_db(self):
+        if not hasattr(self, "env"):
+            self.env = lmdb.open(self._db_path, map_size=1024 * 1024 * 1024 * 1024)
+            if not self._write:
+                self._cnt = self.env.stat()["entries"]
+
     def __init__(self, base_path, write=False):
         self.__init_failed = True  # for __del__
         db_path = os.path.join(base_path, "framedata")
@@ -102,8 +112,7 @@ class IndexDataset(Dataset):
         self._write = write
         self._db_path = db_path
         self._base_path = base_path
-        self._env = lmdb.open(db_path, map_size=1024 * 1024 * 1024 * 1024)
-        self._cnt = self._env.stat()["entries"]
+        self._cnt = 0
 
         if write:
             self._trainset_indexes = []
@@ -122,9 +131,10 @@ class IndexDataset(Dataset):
         return f"{key:08d}".encode("ascii")
 
     def insert_frame_data(self, frame_data: dict):
+        self.open_db()
         frame_data = FrameData(**frame_data)
         assert self._write, "DB is not open for writing"
-        with self._env.begin(write=True) as txn:
+        with self.env.begin(write=True) as txn:
             txn.put(self.ascii_key(self._cnt), pickle.dumps(frame_data))
         if (
             frame_data.human_id in training_subject
@@ -165,17 +175,20 @@ class IndexDataset(Dataset):
             self.__save_split_indices("train", self._trainset_indexes)
             self.__save_split_indices("val", self._valset_indexes)
             self.__save_split_indices("test", self._testset_indexes)
-        self._env.close()
+        if hasattr(self, "env"):
+            self.env.close()
 
     def __del__(self):
         self.close()
 
     def __len__(self):
-        return self._env.stat()["entries"]
+        return self.env.stat()["entries"]
 
     def __getitem__(self, index) -> FrameData:
-        with self._env.begin() as txn:
-            return pickle.loads(txn.get(self.ascii_key(index)))
+        self.open_db()
+        with self.env.begin() as txn:
+            framedata = pickle.loads(txn.get(self.ascii_key(index)))
+        return framedata
 
     def read_only(self):
         return IndexDataset(self.path, write=False)
@@ -337,9 +350,63 @@ class VocaSet(Dataset):
         return self._frame_data[idx]
 
     def get_framedatas(self, target_human_id: str, target_sentence_id: str):
-        res = []
+        new_ins = VocaSet(self.datapath, phase="all")
+        idxs = []
         for idx in self._indices:
             i, human_id, sentence_id = idx.split()
             if human_id == target_human_id and sentence_id == target_sentence_id:
-                res.append(self._frame_data[int(i)])
-        return res
+                idxs.append(i)
+        new_ins._indices = idxs
+        return new_ins
+
+
+def collate_fn(batch):
+    inputs = []
+    labels = []
+    for sample in batch:
+        inputs.append(sample.feature[:, :64].transpose(0, 1))
+        labels.append(torch.tensor(sample.verts).reshape(-1).float())
+    inputs = torch.stack(inputs)
+    labels = torch.stack(labels)
+    # normalize
+    inputs = inputs * 10e3
+    labels = labels * 10
+    return inputs, labels
+
+
+class VocaDataModule(pl.LightningDataModule):
+    def __init__(self, datapath: str, batch_size: int = 32):
+        super().__init__()
+        self.datapath = datapath
+        self.batch_size = batch_size
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            VocaSet(self.datapath, phase="train"),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=4,
+            collate_fn=collate_fn,
+            persistent_workers=True,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            VocaSet(self.datapath, phase="val"),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=4,
+            collate_fn=collate_fn,
+            persistent_workers=True,
+        )
+ 
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader(
+            VocaSet(self.datapath, phase="test"),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=4,
+            collate_fn=collate_fn,
+            persistent_workers=True,
+        )
+
