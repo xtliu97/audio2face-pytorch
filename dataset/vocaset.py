@@ -11,7 +11,7 @@ from rich.progress import Progress, track
 from rich import print
 
 
-from .extractor import MelSpectrogramExtractor
+from .extractor import MelSpectrogramExtractor, LPCExtractor
 
 
 def load_pickle(pkl_path):
@@ -76,10 +76,12 @@ class AduioParams(TypedDict):
 def get_audio_fragment(
     audio: np.ndarray, idx: int, **audio_params: Unpack[AduioParams]
 ) -> np.ndarray | None:
-    n_samples = int(audio_params["sample_rate"] * audio_params["length"])
-    pad_audio = np.concatenate([np.zeros(n_samples), audio, np.zeros(n_samples)])
+    n_pad_samples = int(audio_params["sample_rate"] * audio_params["length"] / 2)
+    pad_audio = np.concatenate(
+        [np.zeros(n_pad_samples), audio, np.zeros(n_pad_samples)]
+    )
     start = idx * audio_params["sample_rate"] // audio_params["fps"]
-    end = start + n_samples
+    end = start + n_pad_samples * 2
     # check if the audio is long enough
     if end > len(pad_audio):
         print(f"Audio is not long enough to get fragment: {end} > {len(pad_audio)}")
