@@ -3,6 +3,7 @@ from typing_extensions import Unpack
 
 
 import torch
+import librosa
 import torchaudio
 import numpy as np
 
@@ -22,7 +23,7 @@ class BaseExtractor:
         hop_length: int,
         normalize: bool = False,
     ):
-        assert feature_type in ["mfcc", "mel"], "Invalid feature type"
+        assert feature_type in ["mfcc", "mel", "lpc"], "Invalid feature type"
         self.feature_type = feature_type
         self.sample_rate = sample_rate
         self.n_feature = n_feature
@@ -54,6 +55,47 @@ class BaseExtractor:
         if self.normalize:
             audio = audio / 32768.0
         return self.extractor(audio)
+
+
+class LPCExtractor(BaseExtractor):
+    def __init__(
+        self,
+        sample_rate: int,
+        n_lpc: int,
+        win_length: int,
+        hop_length: int,
+        n_fft: int | None = None,
+        normalize: bool = False,
+    ):
+        self.__inner_init__(
+            "lpc",
+            sample_rate,
+            n_lpc,
+            n_fft,
+            win_length=win_length,
+            hop_length=hop_length,
+            normalize=normalize,
+        )
+
+    @staticmethod
+    def _get_extractor(self: "BaseExtractor"):
+        pass
+
+    def __call__(self, audio: np.ndarray | torch.Tensor) -> torch.Tensor:
+        if isinstance(audio, torch.Tensor):
+            audio = audio.numpy()
+        if self.normalize:
+            audio = audio / 32768.0
+        ret = []
+        for frame in librosa.util.frame(
+            audio,
+            frame_length=self.win_length,
+            hop_length=self.hop_length,
+            axis=0,
+        ):
+            ret.append(librosa.lpc(frame, order=self.n_feature - 1))
+        ret = torch.FloatTensor(ret)
+        return ret
 
 
 class MelSpectrogramExtractor(BaseExtractor):
