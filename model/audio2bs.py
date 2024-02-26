@@ -13,42 +13,52 @@ class AutoCorrelation(nn.Module):
 class Audio2Face(nn.Module):
     """https://research.nvidia.com/sites/default/files/publications/karras2017siggraph-paper_0.pdf"""
 
-    def __init__(self, out_nums: int = 2018):
+    def __init__(self, out_nums: int = 2018, one_hot_num: int = 12):
         super().__init__()
         # self.instance_norm = nn.InstanceNorm2d(1, affine=True)
 
         self.analysis_net = nn.Sequential(
             nn.Conv2d(1, 72, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),
+            nn.BatchNorm2d(72),
             nn.ReLU(),
             nn.Conv2d(72, 108, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),
+            nn.BatchNorm2d(108),
             nn.ReLU(),
             nn.Conv2d(108, 162, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),
+            nn.BatchNorm2d(162),
             nn.ReLU(),
             nn.Conv2d(162, 243, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),
+            nn.BatchNorm2d(243),
             nn.ReLU(),
             nn.Conv2d(243, 256, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
         )
 
         self.articulation_net = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.Conv2d(256, 256, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.Conv2d(256, 256, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
+            nn.BatchNorm2d(256),
             nn.Conv2d(256, 256, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
             nn.ReLU(),
+            nn.BatchNorm2d(256),
             nn.Conv2d(256, 256, kernel_size=(4, 1), stride=(4, 1)),
             nn.ReLU(),
         )
 
         self.output_net = nn.Sequential(
-            nn.Linear(256, 512),
-            nn.ReLU(),
-            nn.Linear(512, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, out_nums),
+            nn.Linear(256 + one_hot_num, 72),
+            nn.Linear(72, 128),
+            nn.Tanh(),
+            nn.Linear(128, 50),
+            nn.Linear(50, out_nums),
         )
 
         # self.__init_params()
@@ -62,14 +72,16 @@ class Audio2Face(nn.Module):
                 nn.init.kaiming_normal_(m.weight)
                 nn.init.kaiming_normal_(m.bias)
 
-    def forward(self, x):
+    def forward(self, x, one_hot, template):
+        bs = x.size(0)
+        onehot_embedding = one_hot.repeat(1, 32).view(bs, 1, -1, 32)
         x = x.unsqueeze(1)
         # x = self.instance_norm(x)
-        x = self.analysis_net(x)
+        x = self.analysis_net(torch.cat((x, onehot_embedding), 2))
         x = self.articulation_net(x)
         x = x.view(x.size(0), -1)
-        x = self.output_net(x)
-        return x
+        x = self.output_net(torch.cat((x, one_hot), 1))
+        return x + template.view(bs, -1)
 
 
 class Audio2FaceLSTM(nn.Module):

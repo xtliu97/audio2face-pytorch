@@ -11,7 +11,7 @@ from rich.progress import Progress, track
 from rich import print
 
 
-from .extractor import MelSpectrogramExtractor, LPCExtractor
+from .extractor import MelSpectrogramExtractor, LPCExtractor, MFCCExtractor
 
 
 def load_pickle(pkl_path):
@@ -44,6 +44,14 @@ validation_subject = [
     "FaceTalk_170908_03277_TA",
 ]
 validation_sentence = [f"sentence{i:02d}" for i in range(21, 41)]
+test_subject = ["FaceTalk_170809_00138_TA", "FaceTalk_170731_00024_TA"]
+
+
+def get_human_id_one_hot(human_id: str):
+    all_human_id = [*training_subject, *validation_subject, *test_subject]
+    one_hot = np.zeros(len(all_human_id))
+    one_hot[all_human_id.index(human_id)] = 1
+    return one_hot
 
 
 @dataclasses.dataclass
@@ -54,6 +62,8 @@ class FrameData:
     audio: np.ndarray
     verts: np.ndarray
     feature: np.ndarray
+    template_vert: np.ndarray
+    one_hot: np.ndarray
 
     def __repr__(self) -> str:
         return f"""FrameData(
@@ -63,6 +73,8 @@ class FrameData:
     audio: {self.audio.shape},
     verts: {self.verts.shape},
     feature: {self.feature.shape}
+    template_vert: {self.template_vert.shape}
+    one_hot: {self.one_hot}
 )    
 """
 
@@ -104,7 +116,7 @@ class IndexDataset(Dataset):
         self._write = write
         self._db_path = db_path
         self._base_path = base_path
-        self._env = lmdb.open(db_path, map_size=1024 * 1024 * 1024 * 1024)
+        self._env = lmdb.open(db_path, map_size=1024**4, lock=False)
         self._cnt = self._env.stat()["entries"]
 
         if write:
@@ -194,7 +206,7 @@ def pre_fetch_length(
             if sentence_id not in subj_seq_to_idx[clip_name]:
                 continue
             audio_idx = subj_seq_to_idx[clip_name][sentence_id]
-            n_all += sum(len(audio_idx) for _ in audio_data)
+            n_all += len(audio_idx)
     return n_all
 
 
@@ -203,6 +215,7 @@ def build_frame_data(
     raw_audio: VOCASET_AUDIO_TYPE,
     subj_seq_to_idx: VOCASET_SUBJ_SEQ_TO_IDX_TYPE,
     deepspeech_feature,
+    template_verts,
     *,
     max_num: int | None = None,
     save_path: str | None = None,
@@ -215,11 +228,11 @@ def build_frame_data(
     total_audio_idx = pre_fetch_length(
         data_verts, raw_audio, subj_seq_to_idx
     )  # for progress bar
-    T = MelSpectrogramExtractor(
+    T = MFCCExtractor(
         sample_rate=22000,
-        n_mel=32,
-        win_length=176 * 2,
-        hop_length=176,
+        n_mfcc=32,
+        win_length=216 * 2,
+        hop_length=216,
         n_fft=1024,
         normalize=True,
     )
@@ -257,6 +270,9 @@ def build_frame_data(
                     feature = T(audio_frag)
                     n_all += 1
                     if audio_frag is None:
+                        print(
+                            f"Failed to get audio fragment for {clip_name} {sentence_id}"
+                        )
                         continue
                     dataset.insert_frame_data(
                         {
@@ -266,6 +282,8 @@ def build_frame_data(
                             "audio": audio_frag,
                             "verts": data_verts[seq_num],
                             "feature": feature,
+                            "template_vert": template_verts[clip_name],
+                            "one_hot": get_human_id_one_hot(clip_name),
                         }
                     )
 
@@ -289,12 +307,14 @@ def build_dataset(src_datapath: str, dst_datapath: str = None) -> str:
     data_verts_path = os.path.join(datapath, "data_verts.npy")
     subj_seq_to_idx_path = os.path.join(datapath, "subj_seq_to_idx.pkl")
     deepspeech_feature_path = os.path.join(datapath, "processed_audio_deepspeech.pkl")
+    template_verts_path = os.path.join(datapath, "templates.pkl")
     print(f"[bold green]Loaded data from {datapath}")
     #  data
     data_verts = load_npy_mmapped(data_verts_path)
     raw_audio = load_pickle(raw_audio_path)
     subj_seq_to_idx = load_pickle(subj_seq_to_idx_path)
     deepspeech_feature = load_pickle(deepspeech_feature_path)
+    template_verts = load_pickle(template_verts_path)
     #  frame data
     frame_dataset = build_frame_data(
         data_verts,
@@ -302,6 +322,7 @@ def build_dataset(src_datapath: str, dst_datapath: str = None) -> str:
         subj_seq_to_idx,
         deepspeech_feature,
         save_path=dst_datapath,
+        template_verts=template_verts,
     )
     # print(f"Loaded {len(self._frame_data)} frame data")
 
@@ -345,3 +366,9 @@ class VocaSet(Dataset):
             if human_id == target_human_id and sentence_id == target_sentence_id:
                 res.append(self._frame_data[int(i)])
         return res
+
+    def get_template_vert(self, human_id: str):
+        for idx in self._indices:
+            i, human_id, sentence_id = idx.split()
+            if human_id == human_id:
+                return self._frame_data[int(i)].template_vert

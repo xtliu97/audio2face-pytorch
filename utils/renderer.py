@@ -1,5 +1,7 @@
 import time
+import os
 
+os.environ["PYOPENGL_PLATFORM"] = "egl"
 import cv2
 import pyrender
 import numpy as np
