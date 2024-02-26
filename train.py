@@ -13,7 +13,7 @@ import tensorboardX as tb
 
 # import pytorch_lightning as pl
 
-from dataset.vocaset import VocaSet
+from dataset.vocaset import VocaSet, FrameData
 from model.audio2bs import Audio2Face
 from utils.renderer import Renderer, FaceMesh, images_to_video
 from trainer.trainer import Trainer
@@ -25,41 +25,47 @@ valset = VocaSet(dataset_path, "val")
 print(f"Trainset size: {len(trainset)}")
 print(f"Valset size: {len(valset)}")
 
-sample_verts = FaceMesh.load("assets/FLAME_sample.obj").verts
-
-EXPNAME = "loss_1_100_lre-5"
+EXPNAME = "loss_1p_10m_1e-4_mfcc_onehot_epoch50"
 
 
 # %% load model
 def collate_fn(batch):
     inputs = []
+    onehots = []
     labels = []
+    templates = []
     for sample in batch:
+        sample: FrameData = sample
         # inputs.append(sample.feature)
-        inputs.append(sample.feature[:, :64].transpose(0, 1))
+        # inputs.append(sample.feature[:, :52].transpose(0, 1))
 
         # interpolate to (32, 64)
-        # inputs.append(
-        #     F.interpolate(
-        #         torch.tensor(sample.feature, dtype=torch.float32)
-        #         .unsqueeze(0)
-        #         .unsqueeze(0),
-        #         size=(32, 64),
-        #     )
-        #     .squeeze(0)
-        #     .squeeze(0)
-        #     .transpose(0, 1)
-        # )
-        labels.append(
-            torch.tensor(sample.verts).reshape(-1).float() * 100
-            - torch.tensor(sample_verts).reshape(-1).float() * 100
+        inputs.append(
+            F.interpolate(
+                torch.FloatTensor(sample.feature).unsqueeze(0).unsqueeze(0),
+                # sample.feature.unsqueeze(0).unsqueeze(0),
+                size=(32, 52),
+            )
+            .squeeze(0)
+            .squeeze(0)
+            .transpose(0, 1)
         )
+        labels.append(torch.tensor(sample.verts).reshape(-1).float() * 100)
+        onehots.append(torch.tensor(sample.one_hot).float())
+        templates.append(torch.tensor(sample.template_vert).float() * 100)
     inputs = torch.stack(inputs)
+    onehots = torch.stack(onehots)
+    templates = torch.stack(templates)
     # normalize
     # transform = transforms.Compose([transforms.Normalize(mean=0, std=1)])
     # inputs = transform(inputs)
     labels = torch.stack(labels)
-    return inputs, labels
+    return {
+        "inputs": inputs,
+        "onehots": onehots,
+        "labels": labels,
+        "template_vert": templates,
+    }
 
 
 # %% trainer
@@ -67,7 +73,7 @@ model = Audio2Face(5023 * 3)
 dataset_path = os.getcwd()
 trainset = VocaSet(dataset_path, "train")
 valset = VocaSet(dataset_path, "val")
-batch_size = 64
+batch_size = 256
 
 train_loader = DataLoader(
     trainset,
@@ -94,26 +100,37 @@ def inference():
     renderer = Renderer(texture_mesh)
 
     model = Audio2Face(5023 * 3)
-    model.load_state_dict(torch.load(f"ckpt/{EXPNAME}/best_model.pth"))
+    model.load_state_dict(torch.load(f"ckpt/{EXPNAME}/best.pth"))
+
     model.eval()
     dataset_path = os.getcwd()
-    valset = VocaSet(dataset_path, "test")
+    valset = VocaSet(dataset_path).get_framedatas(
+        "FaceTalk_170908_03277_TA", "sentence02"
+    )
     val_loader = DataLoader(
         valset, batch_size=1, shuffle=False, collate_fn=collate_fn, pin_memory=True
     )
-    device = torch.device("cpu")
+    device = torch.device("cuda")
     model.to(device)
     gts = []
     preds = []
     with torch.no_grad():
         for i, data in track(enumerate(val_loader), total=len(val_loader)):
-            inputs, labels = data
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            gts.append(labels.reshape(-1, 5023, 3).numpy() / 100 + sample_verts)
-            preds.append(outputs.reshape(-1, 5023, 3).numpy() / 100 + sample_verts)
-            if i > 100:
-                break
+            inputs, onehots, labels, template_vert = (
+                data["inputs"],
+                data["onehots"],
+                data["labels"],
+                data["template_vert"],
+            )
+            inputs, onehots, labels, template_vert = (
+                inputs.to(device),
+                onehots.to(device),
+                labels.to(device),
+                template_vert.to(device),
+            )
+            outputs = model(inputs, onehots, template_vert)
+            gts.append(labels.reshape(-1, 5023, 3).cpu().numpy() / 100)
+            preds.append(outputs.reshape(-1, 5023, 3).cpu().numpy() / 100)
     gts = np.concatenate(gts)
     preds = np.concatenate(preds)
 
@@ -125,9 +142,9 @@ def inference():
     info(gts)
     info(preds)
 
-    # gts = renderer.render(gts)
+    gts = renderer.render(gts)
     preds = renderer.render(preds)
-    # images_to_video(gts, "gt.mp4")
+    images_to_video(gts, f"{EXPNAME}_gt.mp4")
     images_to_video(preds, f"{EXPNAME}_pred.mp4")
 
 

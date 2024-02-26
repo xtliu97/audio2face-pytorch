@@ -32,50 +32,56 @@ class Hyperparameters:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def diff(verts):
-    with torch.no_grad():
-        err = 0
-        for i in range(1, len(verts)):
-            err += torch.sum(torch.abs(verts[i] - verts[i - 1]))
-        return err
-
-
 class Loss:
     def __init__(self):
-        self.ce = nn.CrossEntropyLoss()
+        pass
 
-    def loss_position(self, pred, gt):
-        return torch.mean((pred - gt) ** 4)
+    def reconstruction_loss(self, pred, gt):
+        return torch.mean(torch.sum((pred - gt) ** 2, axis=2))
 
-    def loss_motion(self, pred, gt):
-        pred0, pred1 = torch.split(pred, pred.size(0) // 2, dim=0)
-        gt0, gt1 = torch.split(gt, gt.size(0) // 2, dim=0)
-        return torch.mean((pred1 - pred0 - (gt1 - gt0)) ** 2)
+    def velocity_loss(self, pred, gt):
+        n_consecutive_frames = 2
+        pred = pred.view(-1, n_consecutive_frames, self.n_verts, 3)
+        gt = gt.view(-1, n_consecutive_frames, self.n_verts, 3)
+
+        v_pred = pred[:, 1] - pred[:, 0]
+        v_gt = gt[:, 1] - gt[:, 0]
+
+        return torch.mean(torch.sum((v_pred - v_gt) ** 2, axis=2))
+
+    def verts_reg_loss(self, pred, gt):
+        raise
 
     def __call__(self, pred, gt):
+        bs = pred.shape[0]
+        gt = gt.view(bs, -1, 3)
+        pred = pred.view(bs, -1, 3)
+        self.n_verts = pred.shape[1]
+
         return {
-            "loss": self.loss_position(pred, gt),
-            "loss_motion": self.loss_motion(pred, gt) * 100,
+            "loss": self.reconstruction_loss(pred, gt),
+            "loss_motion": self.velocity_loss(pred, gt) * 10,
         }
 
 
 class Trainer:
     def __init__(self, exp_name: str = "default"):
         self.exp_name = exp_name
-        self.device = torch.device("mps")
-        self.epochs = 5
+        self.device = torch.device("cuda")
+        self.epochs = 50
         self.epoch = 0
-        self.learning_rate = 0.00001
+        self.learning_rate = 1e-4
         self.criterion = Loss()
         self.log_step_interval = 10
         self.logger = tb.SummaryWriter(f"logs/{self.exp_name}")
         self.model_ckpt_path = f"ckpt/{self.exp_name}"
         os.makedirs(self.model_ckpt_path, exist_ok=True)
         self.best_val_loss = float("inf")
+        self.best_val_epoch = 0
 
     def load_optimizer(self, model: nn.Module, learning_rate: float):
         self.optimizer = optim.Adam(
-            model.parameters(), lr=learning_rate  # , weight_decay=1e-5
+            model.parameters(), lr=learning_rate, weight_decay=1e-5
         )
 
     def run(
@@ -97,12 +103,17 @@ class Trainer:
 
     def train(self, train_loader: data.DataLoader):
         self.model.train()
-        for step, (inputs, targets) in enumerate(
+        for step, batchdata in enumerate(
             track(train_loader, description=f"Training epoch {self.epoch}")
         ):
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            inputs, onehots, targets, template_verts = (
+                batchdata["inputs"].to(self.device),
+                batchdata["onehots"].to(self.device),
+                batchdata["labels"].to(self.device),
+                batchdata["template_vert"].to(self.device),
+            )
             self.optimizer.zero_grad()
-            outputs = self.model(inputs)
+            outputs = self.model(inputs, onehots, template_verts)
             raw_loss = self.criterion(outputs, targets)
             loss = raw_loss["loss"] + raw_loss["loss_motion"]
             if step % self.log_step_interval == 0:
@@ -121,37 +132,57 @@ class Trainer:
                     raw_loss["loss_motion"].item(),
                     self.epoch * len(train_loader) + step,
                 )
+            # calculate gradients
             loss.backward()
             # gradient clipping
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), max_norm=1, norm_type=2
-            )
+            # torch.nn.utils.clip_grad_norm_(
+            #     self.model.parameters(), max_norm=0.01, norm_type=2
+            # )
             self.optimizer.step()
 
-    def validate(self, val_loader: data.DataLoader):
-        self.model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for inputs, targets in track(
-                val_loader, description=f"Validating epoch {self.epoch}"
-            ):
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self.model(inputs)
-                raw_loss = self.criterion(outputs, targets)
-                loss = raw_loss["loss"]
-                val_loss += loss.item()
-        print(
-            f"Epoch {self.epoch} / {self.epochs} "
-            f"Val Loss: {val_loss / len(val_loader)} "
-        )
-        self.logger.add_scalar("val_loss", val_loss / len(val_loader), self.epoch)
         # save model
-        torch.save(
-            self.model.state_dict(), f"{self.model_ckpt_path}/model_{self.epoch}.pth"
-        )
+        torch.save(self.model.state_dict(), f"ckpt/{self.exp_name}/latest.pth")
+        # train metrics
+        train_loss = self.metric(train_loader)
+        print(f"Training loss: {train_loss}")
+        self.logger.add_scalar("MSE/train", train_loss, self.epoch)
+
+    def validate(self, val_loader: data.DataLoader):
+        val_loss = self.metric(val_loader)
+        print(f"Validation loss: {val_loss}")
+        self.logger.add_scalar("MSE/val", val_loss, self.epoch)
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
-            print(f"Best model saved with val loss {val_loss}")
-            torch.save(
-                self.model.state_dict(), f"{self.model_ckpt_path}/best_model.pth"
-            )
+            self.best_val_epoch = self.epoch
+            print("Best model found! Saving model...")
+            torch.save(self.model.state_dict(), f"ckpt/{self.exp_name}/best.pth")
+
+        print(f"Best val loss: {self.best_val_loss} at epoch {self.best_val_epoch}")
+
+    @torch.no_grad()
+    def metric(self, dataloader: data.DataLoader):
+        self.model.eval()
+        all_loss = 0
+        with torch.no_grad():
+            for batchdata in track(
+                dataloader, description=f"Validating epoch {self.epoch}"
+            ):
+                inputs, onehots, targets, template_verts = (
+                    batchdata["inputs"].to(self.device),
+                    batchdata["onehots"].to(self.device),
+                    batchdata["labels"].to(self.device),
+                    batchdata["template_vert"].to(self.device),
+                )
+                outputs = self.model(inputs, onehots, template_verts)
+                # raw_loss = self.criterion(outputs, targets)
+                loss = torch.nn.functional.mse_loss(outputs, targets)
+                all_loss += loss.item()
+        return all_loss / len(dataloader)
+
+
+if __name__ == "__main__":
+
+    gt = torch.stack([i * i * torch.ones(5023, 3) for i in range(10)])
+    pred = torch.stack([i * torch.ones(5023, 3) for i in range(10)])
+    loss = Loss()
+    print(loss(gt, pred))

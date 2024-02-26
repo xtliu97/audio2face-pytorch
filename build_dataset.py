@@ -3,9 +3,6 @@ import os
 from rich.progress import track
 from rich import print
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 from dataset.vocaset import VocaSet, build_dataset
 
 
@@ -18,11 +15,11 @@ def check_dataset(dataset: VocaSet):
 
 
 if __name__ == "__main__":
-    source_datapath = os.path.join(os.getcwd(), "../../Downloads/trainingdata/")
+    source_datapath = os.path.join(os.getcwd(), "../")
     dataset_path = os.getcwd()
 
     # build dataset
-    # build_dataset(source_datapath, dataset_path)
+    build_dataset(source_datapath, dataset_path)
 
     # load dataset
     dataset = VocaSet(dataset_path)

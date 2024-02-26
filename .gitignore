@@ -165,3 +165,5 @@ framedata/
 ckpt/
 logs/
 *.mp4
+*.pth
+*-lock
