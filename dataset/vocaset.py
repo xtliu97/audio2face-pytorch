@@ -1,17 +1,16 @@
 import os
 import pickle
-from typing import TypedDict, List, Mapping, Literal, Tuple
+from typing import TypedDict, Mapping, Literal, cast
 from typing_extensions import Unpack
 import dataclasses
+from functools import lru_cache
 
 import lmdb
+import torch
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
-from rich.progress import Progress, track
+from torch.utils.data import Dataset
 from rich import print
-
-
-from .extractor import MelSpectrogramExtractor, LPCExtractor, MFCCExtractor
+from rich.progress import Progress
 
 
 def load_pickle(pkl_path):
@@ -54,29 +53,194 @@ def get_human_id_one_hot(human_id: str):
     return one_hot
 
 
+@lru_cache(maxsize=20)
+def get_template_vert(datapath, human_id):
+    template_verts_path = os.path.join(datapath, "templates.pkl")
+    template_verts = load_pickle(template_verts_path)
+    return template_verts[human_id]
+
+
 @dataclasses.dataclass
-class FrameData:
+class DataFrame:
     human_id: str
     sentence_id: str
-    seq_num: int
     audio: np.ndarray
+    sample_rate: int
     verts: np.ndarray
-    feature: np.ndarray
-    template_vert: np.ndarray
-    one_hot: np.ndarray
+    # tempalte_vert: np.ndarray
+    fps: int
 
     def __repr__(self) -> str:
-        return f"""FrameData(
+        return f"""DataFrame(
     human_id={self.human_id},
     sentence_id={self.sentence_id},
-    seq_num={self.seq_num},
     audio: {self.audio.shape},
     verts: {self.verts.shape},
-    feature: {self.feature.shape}
-    template_vert: {self.template_vert.shape}
-    one_hot: {self.one_hot}
-)    
-"""
+    tempalte_vert: {self.tempalte_vert.shape}
+    fps: {self.fps}
+)"""
+
+
+class VocaItem(TypedDict):
+    audio: torch.Tensor
+    verts: torch.Tensor
+    template_vert: torch.Tensor
+    one_hot: torch.Tensor
+    feature: torch.Tensor
+
+
+def build_data_frames(
+    data_verts: VOCASET_VERTS_TYPE,
+    raw_audio: VOCASET_AUDIO_TYPE,
+    subj_seq_to_idx: VOCASET_SUBJ_SEQ_TO_IDX_TYPE,
+    template_verts,
+    *,
+    save_path: str | None = None,
+) -> None:
+    save_path = os.path.join(save_path, "clipdata")
+    if save_path is None:
+        save_path = os.path.join(os.getcwd(), "clipdata")
+
+    os.makedirs(save_path, exist_ok=False)
+
+    env = lmdb.open(save_path, map_size=1024**4, lock=False)
+
+    global_idx = 0
+
+    with Progress() as pbar:
+        task = pbar.add_task(
+            "[green]Processing...",
+            total=pre_fetch_length(data_verts, raw_audio, subj_seq_to_idx),
+        )
+        for i, (clip_name, clip_data) in enumerate(raw_audio.items()):
+            if clip_name not in subj_seq_to_idx:
+                print(f"Skipping {clip_name} as it is not in subj_seq_to_idx")
+                continue
+            for j, (sentence_id, audio_data) in enumerate(clip_data.items()):
+                pbar.update(
+                    task,
+                    description=f"Processing {clip_name} {sentence_id} {j}/{len(clip_data)}",
+                )
+                if sentence_id not in subj_seq_to_idx[clip_name]:
+                    print(
+                        f"Skipping {sentence_id} as it is not in subj_seq_to_idx[{clip_name}]"
+                    )
+                    continue
+                audio_idxs = subj_seq_to_idx[clip_name][sentence_id]
+                # verts = []
+                for idx, seq_num in audio_idxs.items():
+                    # verts.append(data_verts[seq_num])
+                    # verts = np.stack(verts)
+                    data_clip = DataFrame(
+                        human_id=clip_name,
+                        sentence_id=sentence_id,
+                        audio=get_audio_fragment(
+                            audio_data["audio"],
+                            idx,
+                            sample_rate=audio_data["sample_rate"],
+                            length=0.52,
+                            fps=60,
+                        ),
+                        sample_rate=audio_data["sample_rate"],
+                        verts=data_verts[seq_num],
+                        # tempalte_vert=template_verts[clip_name],
+                        fps=60,
+                    )
+                    with env.begin(write=True) as txn:
+                        txn.put(str(global_idx).encode(), pickle.dumps(data_clip))
+                    global_idx += 1
+                    pbar.update(task, advance=1)
+    env.close()
+
+    # save template verts
+    with open(os.path.join(save_path, "templates.pkl"), "wb") as f:
+        pickle.dump(template_verts, f)
+
+
+class ClipVocaSet(Dataset):
+    def __init__(
+        self,
+        datapath: str,
+        phase: Literal["train", "val", "test", "all"] = "all",
+        device="cpu",
+    ):
+        self.datapath = os.path.join(datapath, "clipdata")
+        self.tempalte_verts = load_pickle(os.path.join(self.datapath, "templates.pkl"))
+        self.phase = phase
+        self.device = device
+        self.setup()
+        if phase == "train":
+            self.datalist = self.trainlist
+        elif phase == "val":
+            self.datalist = self.vallist
+        elif phase == "test":
+            self.datalist = self.testlist
+        elif phase == "all":
+            self.datalist = [*self.trainlist, *self.vallist, *self.testlist]
+
+    def setup(self):
+        self.trainlist = []
+        self.vallist = []
+        self.testlist = []
+        # human_id, sentence_id = file.rsplit("_", 1)  # same
+        env = lmdb.open(self.datapath, map_size=1024**4, lock=False)
+        txn = env.begin()
+        for key, value in txn.cursor():
+            key = key.decode("ascii")
+            dataclip = pickle.loads(value)
+            dataclip = cast(DataFrame, dataclip)
+            if (
+                dataclip.human_id in training_subject
+                and dataclip.sentence_id in training_sentence
+            ):
+                self.trainlist.append(key)
+            elif (
+                dataclip.human_id in validation_subject
+                and dataclip.sentence_id in validation_sentence
+            ):
+                self.vallist.append(key)
+            else:
+                self.testlist.append(key)
+        print(f"Loaded {len(self.trainlist)} training clips")
+        print(f"Loaded {len(self.vallist)} validation clips")
+        print(f"Loaded {len(self.testlist)} test clips")
+
+    def __init_env(self):
+        if not hasattr(self, "_env"):
+            self._env = lmdb.open(self.datapath, map_size=1024**4, lock=False)
+            self._txn = self._env.begin()
+
+    def get_single_item(self, key) -> VocaItem:
+        self.__init_env()
+        tmp = self._txn.get(key.encode())
+        tmp = cast(DataFrame, pickle.loads(tmp))
+        return VocaItem(
+            audio=torch.FloatTensor(tmp.audio),
+            verts=torch.FloatTensor(tmp.verts),
+            template_vert=torch.FloatTensor(self.tempalte_verts[tmp.human_id]),
+            one_hot=torch.FloatTensor(get_human_id_one_hot(tmp.human_id)),
+        )
+
+    def __len__(self):
+        return len(self.datalist)
+
+    def __getitem__(self, idx):
+        return self.get_single_item(self.datalist[idx])
+
+    def get_framedatas(self, target_human_id: str, target_sentence_id: str):
+        res = []
+        env = lmdb.open(self.datapath, map_size=1024**4, lock=False)
+        txn = env.begin()
+        for key, value in txn.cursor():
+            dataclip = pickle.loads(value)
+            dataclip = cast(DataFrame, dataclip)
+            if (
+                dataclip.human_id == target_human_id
+                and dataclip.sentence_id == target_sentence_id
+            ):
+                res.append(self.get_single_item(key.decode()))
+
+        return res
 
 
 class AduioParams(TypedDict):
@@ -101,100 +265,6 @@ def get_audio_fragment(
     return pad_audio[start:end]
 
 
-class IndexDataset(Dataset):
-    def __init__(self, base_path, write=False):
-        self.__init_failed = True  # for __del__
-        db_path = os.path.join(base_path, "framedata")
-        if write and os.path.exists(db_path):
-            raise FileExistsError(f"DB {db_path} already exists")
-
-        if not write and not os.path.exists(db_path):
-            raise FileNotFoundError(f"DB {db_path} not found")
-
-        self.__init_failed = False
-
-        self._write = write
-        self._db_path = db_path
-        self._base_path = base_path
-        self._env = lmdb.open(db_path, map_size=1024**4, lock=False)
-        self._cnt = self._env.stat()["entries"]
-
-        if write:
-            self._trainset_indexes = []
-            self._valset_indexes = []
-            self._testset_indexes = []
-        else:
-            self._trainset_indexes = self.__load_split_indices("train")
-            self._valset_indexes = self.__load_split_indices("val")
-            self._testset_indexes = self.__load_split_indices("test")
-
-    @property
-    def path(self):
-        return self._base_path
-
-    def ascii_key(self, key) -> bytes:
-        return f"{key:08d}".encode("ascii")
-
-    def insert_frame_data(self, frame_data: dict):
-        frame_data = FrameData(**frame_data)
-        assert self._write, "DB is not open for writing"
-        with self._env.begin(write=True) as txn:
-            txn.put(self.ascii_key(self._cnt), pickle.dumps(frame_data))
-        if (
-            frame_data.human_id in training_subject
-            and frame_data.sentence_id in training_sentence
-        ):
-            self._trainset_indexes.append(
-                f"{self._cnt} {frame_data.human_id} {frame_data.sentence_id}"
-            )
-        elif (
-            frame_data.human_id in validation_subject
-            and frame_data.sentence_id in validation_sentence
-        ):
-            self._valset_indexes.append(
-                f"{self._cnt} {frame_data.human_id} {frame_data.sentence_id}"
-            )
-        else:
-            self._testset_indexes.append(
-                f"{self._cnt} {frame_data.human_id} {frame_data.sentence_id}"
-            )
-        self._cnt += 1
-
-    def __save_split_indices(self, phase_name, indexes):
-        filename = os.path.join(self._db_path, f"{phase_name}_splits.txt")
-        with open(filename, "w") as f:
-            f.write("\n".join(map(str, indexes)))
-        print(f"Saved {phase_name} split indices to {filename}")
-
-    def __load_split_indices(self, phase_name) -> List[int]:
-        filename = os.path.join(self._db_path, f"{phase_name}_splits.txt")
-        with open(filename, "r") as f:
-            return list(map(str, f.read().split("\n")))
-
-    def close(self):
-        if self.__init_failed:
-            return
-
-        if self._write:
-            self.__save_split_indices("train", self._trainset_indexes)
-            self.__save_split_indices("val", self._valset_indexes)
-            self.__save_split_indices("test", self._testset_indexes)
-        self._env.close()
-
-    def __del__(self):
-        self.close()
-
-    def __len__(self):
-        return self._env.stat()["entries"]
-
-    def __getitem__(self, index) -> FrameData:
-        with self._env.begin() as txn:
-            return pickle.loads(txn.get(self.ascii_key(index)))
-
-    def read_only(self):
-        return IndexDataset(self.path, write=False)
-
-
 def pre_fetch_length(
     data_verts: VOCASET_VERTS_TYPE,
     raw_audio: VOCASET_AUDIO_TYPE,
@@ -210,165 +280,34 @@ def pre_fetch_length(
     return n_all
 
 
-def build_frame_data(
-    data_verts: VOCASET_VERTS_TYPE,
-    raw_audio: VOCASET_AUDIO_TYPE,
-    subj_seq_to_idx: VOCASET_SUBJ_SEQ_TO_IDX_TYPE,
-    deepspeech_feature,
-    template_verts,
-    *,
-    max_num: int | None = None,
-    save_path: str | None = None,
-) -> IndexDataset:
-    # frame_data = []
-    if save_path is None:
-        save_path = os.path.dirname(__file__)
-    dataset = IndexDataset(save_path, write=True)
-    n_all, n_success = 0, 0
-    total_audio_idx = pre_fetch_length(
-        data_verts, raw_audio, subj_seq_to_idx
-    )  # for progress bar
-    T = MFCCExtractor(
-        sample_rate=22000,
-        n_mfcc=32,
-        win_length=216 * 2,
-        hop_length=216,
-        n_fft=1024,
-        normalize=True,
-    )
-    with Progress() as pbar:
-        task = pbar.add_task("[green]Processing...", total=total_audio_idx)
-        for i, clip_name, clip_data in zip(
-            range(len(raw_audio)), raw_audio.keys(), raw_audio.values()
-        ):
-            pbar.update(
-                task,
-                description=f"Processing {clip_name} {i}/{len(raw_audio)}",
-            )
-            # print(f"Processing {clip_name} with {len(clip_data)} sentences")
-            subtask = pbar.add_task(f"Processing {clip_name}", total=len(clip_data))
-            if clip_name not in subj_seq_to_idx:
-                print(f"Skipping {clip_name} as it is not in subj_seq_to_idx")
-                n_all += len(clip_data)
-                continue
-            for sentence_id, audio_data in clip_data.items():
-                if sentence_id not in subj_seq_to_idx[clip_name]:
-                    print(
-                        f"Skipping {sentence_id} as it is not in subj_seq_to_idx[{clip_name}]"
-                    )
-                    continue
-                audio_idx = subj_seq_to_idx[clip_name][sentence_id]
-                for idx, seq_num in audio_idx.items():
-                    audio_frag = get_audio_fragment(
-                        audio_data["audio"],
-                        idx,
-                        sample_rate=audio_data["sample_rate"],
-                        length=0.52,
-                        fps=60,
-                    )
-                    # feature = deepspeech_feature[clip_name][sentence_id]["audio"][idx]
-                    feature = T(audio_frag)
-                    n_all += 1
-                    if audio_frag is None:
-                        print(
-                            f"Failed to get audio fragment for {clip_name} {sentence_id}"
-                        )
-                        continue
-                    dataset.insert_frame_data(
-                        {
-                            "human_id": clip_name,
-                            "sentence_id": sentence_id,
-                            "seq_num": seq_num,
-                            "audio": audio_frag,
-                            "verts": data_verts[seq_num],
-                            "feature": feature,
-                            "template_vert": template_verts[clip_name],
-                            "one_hot": get_human_id_one_hot(clip_name),
-                        }
-                    )
-
-                    n_success += 1
-                    pbar.update(task, advance=1)
-                pbar.update(subtask, advance=1)
-            pbar.update(subtask, visible=False)
-            if max_num and n_all >= max_num:
-                break
-
-    dataset.close()
-
-    print(f"Built {n_success} frame data from {n_all} audio fragments")
-    return dataset.read_only()
-
-
 def build_dataset(src_datapath: str, dst_datapath: str = None) -> str:
     print("[bold green]Building dataset...")
     datapath = os.path.abspath(src_datapath)
     raw_audio_path = os.path.join(datapath, "raw_audio_fixed.pkl")
     data_verts_path = os.path.join(datapath, "data_verts.npy")
     subj_seq_to_idx_path = os.path.join(datapath, "subj_seq_to_idx.pkl")
-    deepspeech_feature_path = os.path.join(datapath, "processed_audio_deepspeech.pkl")
+    # deepspeech_feature_path = os.path.join(datapath, "processed_audio_deepspeech.pkl")
     template_verts_path = os.path.join(datapath, "templates.pkl")
     print(f"[bold green]Loaded data from {datapath}")
     #  data
     data_verts = load_npy_mmapped(data_verts_path)
     raw_audio = load_pickle(raw_audio_path)
     subj_seq_to_idx = load_pickle(subj_seq_to_idx_path)
-    deepspeech_feature = load_pickle(deepspeech_feature_path)
+    # deepspeech_feature = load_pickle(deepspeech_feature_path)
     template_verts = load_pickle(template_verts_path)
     #  frame data
-    frame_dataset = build_frame_data(
+    build_data_frames(
         data_verts,
         raw_audio,
         subj_seq_to_idx,
-        deepspeech_feature,
+        # deepspeech_feature,
         save_path=dst_datapath,
         template_verts=template_verts,
     )
     # print(f"Loaded {len(self._frame_data)} frame data")
 
-    print(f"[bold green]Dataset saved to {frame_dataset.path}")
-    return frame_dataset.path
+    print(f"[bold green]Dataset saved to {dst_datapath}")
 
 
-class VocaSet(Dataset):
-    def __init__(
-        self, datapath: str, phase: Literal["train", "val", "test", "all"] = "all"
-    ):
-        self.datapath = os.path.abspath(datapath)
-        self._frame_data = IndexDataset(self.datapath, write=False)
-        self._phase = phase
-        if phase == "all":
-            self._indices = [
-                *self._frame_data._trainset_indexes,
-                *self._frame_data._valset_indexes,
-                *self._frame_data._testset_indexes,
-            ]
-        elif phase == "train":
-            self._indices = self._frame_data._trainset_indexes
-        elif phase == "val":
-            self._indices = self._frame_data._valset_indexes
-        elif phase == "test":
-            self._indices = self._frame_data._testset_indexes
-        else:
-            raise ValueError(f"Invalid phase {phase}")
-
-    def __len__(self):
-        return len(self._indices)
-
-    def __getitem__(self, index):
-        idx = int(self._indices[index].split()[0])
-        return self._frame_data[idx]
-
-    def get_framedatas(self, target_human_id: str, target_sentence_id: str):
-        res = []
-        for idx in self._indices:
-            i, human_id, sentence_id = idx.split()
-            if human_id == target_human_id and sentence_id == target_sentence_id:
-                res.append(self._frame_data[int(i)])
-        return res
-
-    def get_template_vert(self, human_id: str):
-        for idx in self._indices:
-            i, human_id, sentence_id = idx.split()
-            if human_id == human_id:
-                return self._frame_data[int(i)].template_vert
+if __name__ == "__main__":
+    ClipVocaSet("clipdata")
