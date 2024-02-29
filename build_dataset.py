@@ -3,10 +3,10 @@ import os
 from rich.progress import track
 from rich import print
 
-from dataset.vocaset import VocaSet, build_dataset
+from dataset.vocaset import ClipVocaSet, build_dataset
 
 
-def check_dataset(dataset: VocaSet):
+def check_dataset(dataset):
     for data in track(
         dataset, description=f"Checking dataset phase={dataset._phase}..."
     ):
@@ -22,9 +22,9 @@ if __name__ == "__main__":
     build_dataset(source_datapath, dataset_path)
 
     # load dataset
-    dataset = VocaSet(dataset_path)
+    dataset = ClipVocaSet(dataset_path)
 
-    # random vis
+    # check one element
     for data in dataset:
         print(data)
         break
