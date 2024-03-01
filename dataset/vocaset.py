@@ -1,16 +1,14 @@
 import os
 import pickle
-from typing import TypedDict, Mapping, Literal, cast
+from typing import TypedDict, Mapping, Literal
 from typing_extensions import Unpack
-import dataclasses
 from functools import lru_cache
 
-import lmdb
 import torch
+import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 from rich import print
-from rich.progress import Progress
 
 
 def load_pickle(pkl_path):
@@ -25,7 +23,7 @@ def load_npy_mmapped(npy_path):
 
 VOCASET_AUDIO_TYPE = Mapping[str, Mapping[str, np.ndarray]]
 VOCASET_VERTS_TYPE = np.ndarray
-VOCASET_SUBJ_SEQ_TO_IDX_TYPE = Mapping[str, Mapping[str, Mapping[int, int]]]
+VOCASET_WAV_SEQ_TO_IDX_TYPE = Mapping[str, Mapping[str, Mapping[int, int]]]
 
 training_subject = [
     "FaceTalk_170728_03272_TA",
@@ -60,27 +58,6 @@ def get_template_vert(datapath, human_id):
     return template_verts[human_id]
 
 
-@dataclasses.dataclass
-class DataFrame:
-    human_id: str
-    sentence_id: str
-    audio: np.ndarray
-    sample_rate: int
-    verts: np.ndarray
-    # tempalte_vert: np.ndarray
-    fps: int
-
-    def __repr__(self) -> str:
-        return f"""DataFrame(
-    human_id={self.human_id},
-    sentence_id={self.sentence_id},
-    audio: {self.audio.shape},
-    verts: {self.verts.shape},
-    tempalte_vert: {self.tempalte_vert.shape}
-    fps: {self.fps}
-)"""
-
-
 class VocaItem(TypedDict):
     audio: torch.Tensor
     verts: torch.Tensor
@@ -89,72 +66,109 @@ class VocaItem(TypedDict):
     feature: torch.Tensor
 
 
-def build_data_frames(
-    data_verts: VOCASET_VERTS_TYPE,
-    raw_audio: VOCASET_AUDIO_TYPE,
-    subj_seq_to_idx: VOCASET_SUBJ_SEQ_TO_IDX_TYPE,
-    template_verts,
-    *,
-    save_path: str | None = None,
-) -> None:
-    save_path = os.path.join(save_path, "clipdata")
-    if save_path is None:
-        save_path = os.path.join(os.getcwd(), "clipdata")
+class DataSplitRecorder:
+    def __init__(self, write: bool = True) -> None:
+        self.write = write
+        self.train_list = []
+        self.val_list = []
+        self.test_list = []
 
-    os.makedirs(save_path, exist_ok=False)
+    def write_only(func):
+        def wrapper(self, *args, **kwargs):
+            if self.write:
+                return func(self, *args, **kwargs)
+            else:
+                raise ValueError("This instance is read only")
 
-    env = lmdb.open(save_path, map_size=1024**4, lock=False)
+        return wrapper
 
-    global_idx = 0
+    @write_only
+    def add(
+        self, humnan_id: str, sentence_id: str, clip_index: int, data_verts_index: int
+    ):
+        if humnan_id in training_subject and sentence_id in training_sentence:
+            self.train_list.append(
+                (humnan_id, sentence_id, clip_index, data_verts_index)
+            )
+        elif humnan_id in validation_subject and sentence_id in validation_sentence:
+            self.val_list.append((humnan_id, sentence_id, clip_index, data_verts_index))
+        else:
+            self.test_list.append(
+                (humnan_id, sentence_id, clip_index, data_verts_index)
+            )
 
-    with Progress() as pbar:
-        task = pbar.add_task(
-            "[green]Processing...",
-            total=pre_fetch_length(data_verts, raw_audio, subj_seq_to_idx),
-        )
-        for i, (clip_name, clip_data) in enumerate(raw_audio.items()):
+    @write_only
+    def save(self, path: str):
+        import pandas as pd
+
+        def _save_list(ls, name):
+            df = pd.DataFrame(
+                ls,
+                columns=["human_id", "sentence_id", "clip_index", "data_verts_index"],
+            )
+            df.to_csv(name, index=False)
+
+        _save_list(self.train_list, f"{path}/train_list.csv")
+        _save_list(self.val_list, f"{path}/val_list.csv")
+        _save_list(self.test_list, f"{path}/test_list.csv")
+
+    @staticmethod
+    def build(
+        raw_audio: VOCASET_AUDIO_TYPE,
+        subj_seq_to_idx: VOCASET_WAV_SEQ_TO_IDX_TYPE,
+        *,
+        save_path: str | None = None,
+    ):
+        save_path = os.path.join(save_path, "split")
+        os.makedirs(save_path, exist_ok=False)
+        data_split_recorder = DataSplitRecorder()
+        for clip_name, clip_data in raw_audio.items():
             if clip_name not in subj_seq_to_idx:
-                print(f"Skipping {clip_name} as it is not in subj_seq_to_idx")
                 continue
-            for j, (sentence_id, audio_data) in enumerate(clip_data.items()):
-                pbar.update(
-                    task,
-                    description=f"Processing {clip_name} {sentence_id} {j}/{len(clip_data)}",
-                )
+            for sentence_id, audio_data in clip_data.items():
                 if sentence_id not in subj_seq_to_idx[clip_name]:
-                    print(
-                        f"Skipping {sentence_id} as it is not in subj_seq_to_idx[{clip_name}]"
-                    )
                     continue
-                audio_idxs = subj_seq_to_idx[clip_name][sentence_id]
-                # verts = []
-                for idx, seq_num in audio_idxs.items():
-                    # verts.append(data_verts[seq_num])
-                    # verts = np.stack(verts)
-                    data_clip = DataFrame(
-                        human_id=clip_name,
-                        sentence_id=sentence_id,
-                        audio=get_audio_fragment(
-                            audio_data["audio"],
-                            idx,
-                            sample_rate=audio_data["sample_rate"],
-                            length=0.52,
-                            fps=60,
-                        ),
-                        sample_rate=audio_data["sample_rate"],
-                        verts=data_verts[seq_num],
-                        # tempalte_vert=template_verts[clip_name],
-                        fps=60,
-                    )
-                    with env.begin(write=True) as txn:
-                        txn.put(str(global_idx).encode(), pickle.dumps(data_clip))
-                    global_idx += 1
-                    pbar.update(task, advance=1)
-    env.close()
+                audio_idxs_mapping = subj_seq_to_idx[clip_name][sentence_id]
+                for clip_index, seq_num in audio_idxs_mapping.items():
+                    data_split_recorder.add(clip_name, sentence_id, clip_index, seq_num)
 
-    # save template verts
-    with open(os.path.join(save_path, "templates.pkl"), "wb") as f:
-        pickle.dump(template_verts, f)
+        data_split_recorder.save(save_path)
+
+    @staticmethod
+    def exists(path: str):
+        path = os.path.join(path, "split")
+        return (
+            os.path.exists(f"{path}/train_list.csv")
+            and os.path.exists(f"{path}/val_list.csv")
+            and os.path.exists(f"{path}/test_list.csv")
+        )
+
+    @classmethod
+    def load(cls, path: str):
+        path = os.path.join(path, "split")
+
+        def _load_list(name):
+            df = pd.read_csv(name, header=0)
+            return df.to_numpy().tolist()
+
+        train_list = _load_list(f"{path}/train_list.csv")
+        val_list = _load_list(f"{path}/val_list.csv")
+        test_list = _load_list(f"{path}/test_list.csv")
+        recorder = cls(write=False)
+        recorder.train_list = train_list
+        recorder.val_list = val_list
+        recorder.test_list = test_list
+        return recorder
+
+    def get_list(self, phase: Literal["train", "val", "test", "all"] = "all"):
+        if phase == "train":
+            return self.train_list
+        elif phase == "val":
+            return self.val_list
+        elif phase == "test":
+            return self.test_list
+        else:
+            return self.train_list + self.val_list + self.test_list
 
 
 class ClipVocaSet(Dataset):
@@ -162,63 +176,59 @@ class ClipVocaSet(Dataset):
         self,
         datapath: str,
         phase: Literal["train", "val", "test", "all"] = "all",
-        device="cpu",
     ):
-        self.datapath = os.path.join(datapath, "clipdata")
-        self.tempalte_verts = load_pickle(os.path.join(self.datapath, "templates.pkl"))
         self.phase = phase
-        self.device = device
-        self.setup()
-        if phase == "train":
-            self.datalist = self.trainlist
-        elif phase == "val":
-            self.datalist = self.vallist
-        elif phase == "test":
-            self.datalist = self.testlist
-        elif phase == "all":
-            self.datalist = [*self.trainlist, *self.vallist, *self.testlist]
+        self.datapath = os.path.abspath(datapath)
 
-    def setup(self):
-        self.trainlist = []
-        self.vallist = []
-        self.testlist = []
-        # human_id, sentence_id = file.rsplit("_", 1)  # same
-        env = lmdb.open(self.datapath, map_size=1024**4, lock=False)
-        txn = env.begin()
-        for key, value in txn.cursor():
-            key = key.decode("ascii")
-            dataclip = pickle.loads(value)
-            dataclip = cast(DataFrame, dataclip)
-            if (
-                dataclip.human_id in training_subject
-                and dataclip.sentence_id in training_sentence
-            ):
-                self.trainlist.append(key)
-            elif (
-                dataclip.human_id in validation_subject
-                and dataclip.sentence_id in validation_sentence
-            ):
-                self.vallist.append(key)
-            else:
-                self.testlist.append(key)
-        print(f"Loaded {len(self.trainlist)} training clips")
-        print(f"Loaded {len(self.vallist)} validation clips")
-        print(f"Loaded {len(self.testlist)} test clips")
+        self.tempalte_verts: Mapping[str, np.ndarray] = load_pickle(
+            os.path.join(self.datapath, "templates.pkl")
+        )
+        self.raw_audio: VOCASET_AUDIO_TYPE = load_pickle(
+            os.path.join(self.datapath, "raw_audio_fixed.pkl")
+        )
 
-    def __init_env(self):
-        if not hasattr(self, "_env"):
-            self._env = lmdb.open(self.datapath, map_size=1024**4, lock=False)
-            self._txn = self._env.begin()
+        self.data_verts: VOCASET_VERTS_TYPE = load_npy_mmapped(
+            os.path.join(self.datapath, "data_verts.npy")
+        )
+
+        self.wav_seq_to_idx: VOCASET_WAV_SEQ_TO_IDX_TYPE = load_pickle(
+            os.path.join(self.datapath, "subj_seq_to_idx.pkl")
+        )
+
+        if not DataSplitRecorder.exists(self.datapath):
+            print("Building dataset...")
+            DataSplitRecorder.build(
+                raw_audio=self.raw_audio,
+                subj_seq_to_idx=self.wav_seq_to_idx,
+                save_path=self.datapath,
+            )
+
+        self.split_recorder = DataSplitRecorder.load(self.datapath)
+        self.datalist = self.split_recorder.get_list(phase)
+        print(f"Loaded {len(self.datalist)} frame data of phase {self.phase}")
+
+    def __repr__(self) -> str:
+        return f"""ClipVocaSet(
+    phase={self.phase},
+    datapath={self.datapath},
+    len={len(self.datalist)}
+)"""
 
     def get_single_item(self, key) -> VocaItem:
-        self.__init_env()
-        tmp = self._txn.get(key.encode())
-        tmp = cast(DataFrame, pickle.loads(tmp))
+        human_id, sentence_id, audio_index, data_verts_index = key
+
+        audio = self.raw_audio[human_id][sentence_id]["audio"]
+        sr = self.raw_audio[human_id][sentence_id]["sample_rate"]
+        verts = self.data_verts[data_verts_index]
+        audio_clip = get_audio_fragment(
+            audio, audio_index, fps=60, sample_rate=sr, length=0.52
+        )
+
         return VocaItem(
-            audio=torch.FloatTensor(tmp.audio),
-            verts=torch.FloatTensor(tmp.verts),
-            template_vert=torch.FloatTensor(self.tempalte_verts[tmp.human_id]),
-            one_hot=torch.FloatTensor(get_human_id_one_hot(tmp.human_id)),
+            audio=torch.FloatTensor(audio_clip.copy()),
+            verts=torch.FloatTensor(verts.copy()),
+            template_vert=torch.FloatTensor(self.tempalte_verts[human_id].copy()),
+            one_hot=torch.FloatTensor(get_human_id_one_hot(human_id).copy()),
         )
 
     def __len__(self):
@@ -229,18 +239,17 @@ class ClipVocaSet(Dataset):
 
     def get_framedatas(self, target_human_id: str, target_sentence_id: str):
         res = []
-        env = lmdb.open(self.datapath, map_size=1024**4, lock=False)
-        txn = env.begin()
-        for key, value in txn.cursor():
-            dataclip = pickle.loads(value)
-            dataclip = cast(DataFrame, dataclip)
-            if (
-                dataclip.human_id == target_human_id
-                and dataclip.sentence_id == target_sentence_id
-            ):
-                res.append(self.get_single_item(key.decode()))
+        for data_info in self.datalist:
+            if data_info[0] == target_human_id and data_info[1] == target_sentence_id:
+                res.append(
+                    (
+                        self.get_single_item(data_info),
+                        data_info[2],
+                    )
+                )
+        sorted(res, key=lambda x: x[1])
 
-        return res
+        return [x[0] for x in res]
 
 
 class AduioParams(TypedDict):
@@ -265,49 +274,6 @@ def get_audio_fragment(
     return pad_audio[start:end]
 
 
-def pre_fetch_length(
-    data_verts: VOCASET_VERTS_TYPE,
-    raw_audio: VOCASET_AUDIO_TYPE,
-    subj_seq_to_idx: VOCASET_SUBJ_SEQ_TO_IDX_TYPE,
-) -> int:
-    n_all = 0
-    for clip_name, clip_data in raw_audio.items():
-        for sentence_id, audio_data in clip_data.items():
-            if sentence_id not in subj_seq_to_idx[clip_name]:
-                continue
-            audio_idx = subj_seq_to_idx[clip_name][sentence_id]
-            n_all += len(audio_idx)
-    return n_all
-
-
-def build_dataset(src_datapath: str, dst_datapath: str = None) -> str:
-    print("[bold green]Building dataset...")
-    datapath = os.path.abspath(src_datapath)
-    raw_audio_path = os.path.join(datapath, "raw_audio_fixed.pkl")
-    data_verts_path = os.path.join(datapath, "data_verts.npy")
-    subj_seq_to_idx_path = os.path.join(datapath, "subj_seq_to_idx.pkl")
-    # deepspeech_feature_path = os.path.join(datapath, "processed_audio_deepspeech.pkl")
-    template_verts_path = os.path.join(datapath, "templates.pkl")
-    print(f"[bold green]Loaded data from {datapath}")
-    #  data
-    data_verts = load_npy_mmapped(data_verts_path)
-    raw_audio = load_pickle(raw_audio_path)
-    subj_seq_to_idx = load_pickle(subj_seq_to_idx_path)
-    # deepspeech_feature = load_pickle(deepspeech_feature_path)
-    template_verts = load_pickle(template_verts_path)
-    #  frame data
-    build_data_frames(
-        data_verts,
-        raw_audio,
-        subj_seq_to_idx,
-        # deepspeech_feature,
-        save_path=dst_datapath,
-        template_verts=template_verts,
-    )
-    # print(f"Loaded {len(self._frame_data)} frame data")
-
-    print(f"[bold green]Dataset saved to {dst_datapath}")
-
-
 if __name__ == "__main__":
-    ClipVocaSet("clipdata")
+    dataset = ClipVocaSet("../")
+    print(dataset)
