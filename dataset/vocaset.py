@@ -5,6 +5,7 @@ from typing_extensions import Unpack
 from functools import lru_cache
 
 import torch
+import random
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
@@ -176,8 +177,10 @@ class ClipVocaSet(Dataset):
         self,
         datapath: str,
         phase: Literal["train", "val", "test", "all"] = "all",
+        random_shift: bool = False,
     ):
         self.phase = phase
+        self.random_shift = random_shift
         self.datapath = os.path.abspath(datapath)
 
         self.tempalte_verts: Mapping[str, np.ndarray] = load_pickle(
@@ -220,8 +223,12 @@ class ClipVocaSet(Dataset):
         audio = self.raw_audio[human_id][sentence_id]["audio"]
         sr = self.raw_audio[human_id][sentence_id]["sample_rate"]
         verts = self.data_verts[data_verts_index]
+        if self.random_shift and self.phase == "train":
+            random_shift = random.randint(-500, 500)  # 1%
+        else:
+            random_shift = 0
         audio_clip = get_audio_fragment(
-            audio, audio_index, fps=60, sample_rate=sr, length=0.52
+            audio, audio_index, fps=60, sample_rate=sr, length=0.52, shift=random_shift
         )
 
         return VocaItem(
@@ -256,14 +263,19 @@ class AduioParams(TypedDict):
     fps: int
     sample_rate: int
     length: float
+    shift: int
 
 
 def get_audio_fragment(
     audio: np.ndarray, idx: int, **audio_params: Unpack[AduioParams]
 ) -> np.ndarray | None:
+    l_pad_samples = (
+        int(audio_params["sample_rate"] * audio_params["length"] / 2)
+        + audio_params["shift"]
+    )
     n_pad_samples = int(audio_params["sample_rate"] * audio_params["length"] / 2)
     pad_audio = np.concatenate(
-        [np.zeros(n_pad_samples), audio, np.zeros(n_pad_samples)]
+        [np.zeros(l_pad_samples), audio, np.zeros(2 * n_pad_samples)]
     )
     start = idx * audio_params["sample_rate"] // audio_params["fps"]
     end = start + n_pad_samples * 2
