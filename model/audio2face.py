@@ -1,12 +1,13 @@
+import os
+import sys
 import logging
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torchaudio
 import lightning as L
 
-
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from utils.renderer import Renderer, FaceMesh, images_to_video  # noqa
 
 
@@ -170,11 +171,59 @@ class Loss:
         }
 
 
+class Voca(nn.Module):
+    def __init__(self, n_verts: int, n_onehot: int):
+        super().__init__()
+        self.n_verts = n_verts
+        self.n_onehot = n_onehot
+
+        self.feature_extractor = MFCCExtractor(
+            sample_rate=22000,
+            n_mfcc=16,
+            out_dim=29,
+            win_length=395 * 2,
+            n_fft=2048,
+            normalize=True,
+        )
+
+        self.time_conv = nn.Sequential(
+            nn.Conv2d(37, 32, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
+            nn.ReLU(),
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Linear(64 + 8, 72),
+            nn.Linear(72, 128),
+            nn.Tanh(),
+            nn.Linear(128, 50),
+            nn.Linear(50, n_verts),
+        )
+
+    def forward(self, x, one_hot, template):
+        bs = x.size(0)
+        one_hot = one_hot[:, :8]
+        x = self.feature_extractor(x)
+        onehot_embedding = one_hot.repeat(1, 16).view(bs, 1, -1, 16)
+        x = x.unsqueeze(1)
+        x = torch.cat((x, onehot_embedding), 2)  # [bs, 1, 37, 16]
+        x = x.permute(0, 2, 3, 1)  # [bs, 37, 16,1]
+        x = self.time_conv(x)
+        x = torch.concat([x.view(bs, -1), one_hot], 1)  # [bs, 64 + 8]
+        x = self.decoder(x)
+        return x.view(bs, -1, 3) + template
+
+
 class Audio2Face(L.LightningModule):
     def __init__(self, n_verts: int, n_onehot: int):
         super().__init__()
         self.model = Audio2FaceBase(n_verts, n_onehot)
-        self.loss = Loss(k_rec=1.0, k_vel=1)
+        self.loss = Loss(k_rec=1.0, k_vel=10)
         self.lr = 1e-4
         self.lr_weight_decay = 1e-5
 
@@ -235,12 +284,13 @@ class Audio2Face(L.LightningModule):
         rendered_image = renderer.render(predicted_verts[random_idx].cpu().numpy())[0]
         gt_image = renderer.render(gt_verts[random_idx].cpu().numpy())[0]
 
-        self.logger.experiment.add_image(
-            "val/prediction", rendered_image.transpose(2, 0, 1), self.current_epoch
-        )
-        self.logger.experiment.add_image(
-            "val/gt", gt_image.transpose(2, 0, 1), self.current_epoch
-        )
+        if self.logger:
+            self.logger.experiment.add_image(
+                "val/prediction", rendered_image.transpose(2, 0, 1), self.current_epoch
+            )
+            self.logger.experiment.add_image(
+                "val/gt", gt_image.transpose(2, 0, 1), self.current_epoch
+            )
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
@@ -283,7 +333,7 @@ class Audio2Face(L.LightningModule):
 if __name__ == "__main__":
     sample = torch.randn(1, int(0.52 * 22000))
     one_hot = torch.randn(1, 12)
-    model = Audio2FaceBase(5023 * 3, 12)
+    model = Voca(5023 * 3, 12)
     template = torch.randn(1, 5023, 3)
     out = model(sample, one_hot, template)
     print(out.shape)
