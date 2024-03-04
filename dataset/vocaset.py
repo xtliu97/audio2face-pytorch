@@ -3,12 +3,14 @@ import pickle
 from typing import TypedDict, Mapping, Literal
 from typing_extensions import Unpack
 from functools import lru_cache
+from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 
 import torch
 import random
 import pandas as pd
 import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+import lightning as L
 from rich import print
 
 
@@ -257,6 +259,73 @@ class ClipVocaSet(Dataset):
         sorted(res, key=lambda x: x[1])
 
         return [x[0] for x in res]
+
+
+class VocaDataModule(L.LightningDataModule):
+    def __init__(
+        self,
+        datapath: str,
+        batch_size: int = 32,
+        num_workers: int = 4,
+        random_shift: bool = False,
+    ):
+        super().__init__()
+        self.datapath = datapath
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.random_shift = random_shift
+
+    def setup(self, stage: str | None = None):
+        self.train_dataset = ClipVocaSet(
+            self.datapath, phase="train", random_shift=self.random_shift
+        )
+        self.val_dataset = ClipVocaSet(
+            self.datapath, phase="val", random_shift=self.random_shift
+        )
+        self.test_dataset = ClipVocaSet(
+            self.datapath, phase="test", random_shift=self.random_shift
+        )
+        print(f"Train: {len(self.train_dataset)}")
+        print(f"Val: {len(self.val_dataset)}")
+        print(f"Test: {len(self.test_dataset)}")
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+    def predict_dataloader(self, human_id: str, sentence_id: str):
+        return DataLoader(
+            self.test_dataset.get_framedatas(human_id, sentence_id),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+        )
 
 
 class AduioParams(TypedDict):
