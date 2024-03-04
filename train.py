@@ -1,13 +1,12 @@
-# %% import
 import os
 
-import torch
 from torch.utils.data import DataLoader
 import lightning as L
 from lightning.pytorch.callbacks import (
     ModelCheckpoint,
     EarlyStopping,
     RichProgressBar,
+    # DeviceStatsMonitor,
 )
 
 from dataset.vocaset import ClipVocaSet
@@ -20,7 +19,6 @@ EXPNAME = "shuffle_1_10_randomshift_5"
 batch_size = 512
 
 if __name__ == "__main__":
-    model = Audio2Face(5023 * 3, 12)
     train_batch_size = 512
     val_batch_size = 256
 
@@ -60,24 +58,22 @@ if __name__ == "__main__":
         pin_memory=True,
         drop_last=False,
     )
-
     print(f"Trainset size: {len(trainset)}")
     print(f"Valset size: {len(valset)}")
     print(f"Testset size: {len(testset)}")
+
+    model = Audio2Face(5023 * 3, 12)
     trainer = L.Trainer(
-        # profiler="simple",
         callbacks=[
             ModelCheckpoint(monitor="val/err", save_last=True),
-            EarlyStopping(monitor="val/err"),
+            EarlyStopping(monitor="val/err", patience=5),
             RichProgressBar(),
             # DeviceStatsMonitor(),
         ],
-        max_epochs=20,
+        max_epochs=50,
     )
     trainer.fit(model, train_loader, val_loader)
 
-    exp_log_folder = trainer.log_dir
-
-    model = Audio2Face.load_from_checkpoint(f"{exp_log_folder}/checkpoints/last.ckpt")
+    model = Audio2Face.load_from_checkpoint(f"{trainer.log_dir}/checkpoints/last.ckpt")
     trainer = L.Trainer(logger=False)
     trainer.predict(model, testlaoder)
