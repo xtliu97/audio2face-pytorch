@@ -222,7 +222,7 @@ class Voca(nn.Module):
 class Audio2Face(L.LightningModule):
     def __init__(self, n_verts: int, n_onehot: int):
         super().__init__()
-        self.model = Audio2FaceBase(n_verts, n_onehot)
+        self.model = Voca(n_verts, n_onehot)
         self.loss = Loss(k_rec=1.0, k_vel=10)
         self.lr = 1e-4
         self.lr_weight_decay = 1e-5
