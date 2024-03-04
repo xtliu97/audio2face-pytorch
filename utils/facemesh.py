@@ -6,8 +6,8 @@ import trimesh
 
 class FaceMesh:
     def __check_mesh_validity(self, arr):
-        assert arr.ndim == 2, "arr.ndim must be 2"
-        assert arr.shape[1] == 3, "arr.shape[1] must be 3"
+        assert arr.ndim == 2, f"arr.ndim must be 2, got arr shape {arr.shape}"
+        assert arr.shape[1] == 3, f"arr.shape[1] must be 3, got arr shape {arr.shape}"
 
     def __init__(self, verts, faces):
         self.__check_mesh_validity(verts)

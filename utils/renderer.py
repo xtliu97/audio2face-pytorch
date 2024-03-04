@@ -95,7 +95,7 @@ class Renderer:
         prev_rendered_image = None
         rendered_images = []
         n_success = 0
-        for target_vert in track(target_verts, description="Rendering frames..."):
+        for target_vert in target_verts:
             try:
                 rendered_image = self._render_frame(target_vert)
                 n_success += 1
@@ -116,6 +116,11 @@ def images_to_video(images: list, output: str, fps: int = 60):
     height, width, _ = images[0].shape
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     video = cv2.VideoWriter(output, fourcc, fps, (width, height))
-    for img in track(images, description="Writing frames to video..."):
+    for img in track(images, description=f"Writing frames to {output}..."):
         video.write(img)
     video.release()
+
+
+def verts_to_npy(verts: np.ndarray, output: str):
+    np.save(output, verts)
+    print(f"Saved verts to {output}")
