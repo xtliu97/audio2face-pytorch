@@ -167,3 +167,8 @@ logs/
 *.mp4
 *.pth
 *-lock
+*.npy
+old/
+clipdata/
+lightning_logs/
+.flake8

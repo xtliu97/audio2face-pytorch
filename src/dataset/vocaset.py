@@ -285,9 +285,6 @@ class VocaDataModule(L.LightningDataModule):
         self.test_dataset = ClipVocaSet(
             self.datapath, phase="test", random_shift=self.random_shift
         )
-        print(f"Train: {len(self.train_dataset)}")
-        print(f"Val: {len(self.val_dataset)}")
-        print(f"Test: {len(self.test_dataset)}")
 
     def train_dataloader(self):
         return DataLoader(
