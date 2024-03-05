@@ -1,5 +1,10 @@
-# VOCA-Pytorch
-Pytorch implementation of 'Capture, Learning, and Synthesis of 3D Speaking Styles' (CVPR 2019)
+# audio2face-pytorch
+
+Pytorch implementation of audio generating face mesh or blendshape models. 
+
+# Dataset
+This repo use VOCASET as the template. 
+'Capture, Learning, and Synthesis of 3D Speaking Styles' (CVPR 2019)
 
 # 
 Under developing
