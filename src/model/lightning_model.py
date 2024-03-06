@@ -122,5 +122,68 @@ class Audio2FaceModel(L.LightningModule):
         self.predicted_verts = []
 
         rendered_image = renderer.render(predicted_verts.cpu().numpy())
-
+        
         images_to_video(rendered_image, f"{self.logger.log_dir}/best_ckpt.mp4")
+
+    @torch.no_grad()
+    def stream(self,template):
+        import pyaudio
+        import numpy as np
+        import queue
+        import time
+        import cv2
+        from collections import deque
+        from matplotlib import pyplot as plt
+        
+        FORMAT = pyaudio.paInt16
+        CHANNELS = 1
+        RATE = 22000
+        CLIP_LENGTH = 0.52
+        WIN_LENGTH = int(RATE * CLIP_LENGTH)
+        HOP_LENGTH = WIN_LENGTH // 2
+        UPDATE_FPS = 30
+        CHUNK = HOP_LENGTH // UPDATE_FPS    
+        
+        write_deque = deque(maxlen=UPDATE_FPS*2)
+        
+        def callback(in_data, frame_count, time_info, status):
+            write_deque.append(np.frombuffer(in_data, dtype=np.int16))
+            # print("callback", in_data.shape, frame_count, time_info, status)
+            return (None, pyaudio.paContinue)
+        
+        p = pyaudio.PyAudio()
+        stream = p.open(format=FORMAT,
+                        channels=CHANNELS,
+                        rate=RATE,
+                        input=True,
+                        frames_per_buffer=CHUNK,
+                        stream_callback=callback)
+
+        def wavform_to_image(wavform):
+            plt.plot(wavform)
+            plt.savefig("audiowave.png", dpi=100)
+            plt.ylim(-2**15, 2**15)
+            plt.close()
+            return cv2.imread("audiowave.png")
+        
+        while True:
+            start_time = time.time()
+            if len(write_deque) < 10:
+                continue
+            # audio_data = write_deque.popleft()
+            audio_data = np.concatenate(write_deque, axis=0)
+            
+
+            # set to 0 if abs value < 1000
+            # curr = np.where(np.abs(audio_data) < 1000, 0, audio_data)
+            x = torch.tensor(audio_data, dtype=torch.float32).unsqueeze(0)
+            one_hot = torch.zeros(1, 12)
+            pred = self.model(x, one_hot, template * 100) / 100
+            rendered_image = self.get_renderer().render(pred.cpu().numpy())[0]
+            audiowave_figure = wavform_to_image(audio_data)
+            audiowave_figure = cv2.resize(audiowave_figure, (rendered_image.shape[1], rendered_image.shape[0]))
+            rendered_image = cv2.hconcat([rendered_image, audiowave_figure])
+            fps = 1/(time.time() -start_time)
+            cv2.putText(rendered_image, f"fps: {fps}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.imshow("video", rendered_image)
+            cv2.waitKey(1)

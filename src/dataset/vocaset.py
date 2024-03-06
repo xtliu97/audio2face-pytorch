@@ -323,6 +323,9 @@ class VocaDataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
         )
+    
+    def template(self, human_id: str):
+        return torch.FloatTensor(get_template_vert(self.datapath, human_id))
 
 
 class AduioParams(TypedDict):
