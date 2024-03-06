@@ -6,18 +6,24 @@ import lightning as L
 from ..loss import VocaLoss
 from .voca import Voca
 from .audio2face import Audio2Mesh
+from .song2face import Song2Face
 from ..utils.renderer import Renderer, FaceMesh, images_to_video
 
 
 class Audio2FaceModel(L.LightningModule):
     def __init__(
-        self, model_name: Literal["voca", "audio2mesh"], n_verts: int, n_onehot: int
+        self,
+        model_name: Literal["voca", "audio2mesh", "song2face"],
+        n_verts: int,
+        n_onehot: int,
     ):
         super().__init__()
         if model_name == "voca":
             model = Voca
         elif model_name == "audio2mesh":
             model = Audio2Mesh
+        elif model_name == "song2face":
+            model = Song2Face
         else:
             raise ValueError(f"Unknown model_name: {model_name}")
         self.model = model(n_verts, n_onehot)
