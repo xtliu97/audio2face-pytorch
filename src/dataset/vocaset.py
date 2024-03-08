@@ -3,9 +3,9 @@ import pickle
 from typing import TypedDict, Mapping, Literal
 from typing_extensions import Unpack
 from functools import lru_cache
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 
 import torch
+import torchaudio
 import random
 import pandas as pd
 import numpy as np
@@ -59,6 +59,14 @@ def get_template_vert(datapath, human_id):
     template_verts_path = os.path.join(datapath, "templates.pkl")
     template_verts = load_pickle(template_verts_path)
     return template_verts[human_id]
+
+
+def normalize_audio(audio: np.ndarray) -> np.ndarray:
+    if audio.dtype == np.int16:
+        audio = audio / 32768
+        return audio.astype(np.float32)
+    else:
+        raise f"Got audio with dtype {audio.dtype} when normalizing, expected np.int16"
 
 
 class VocaItem(TypedDict):
@@ -120,7 +128,7 @@ class DataSplitRecorder:
         raw_audio: VOCASET_AUDIO_TYPE,
         subj_seq_to_idx: VOCASET_WAV_SEQ_TO_IDX_TYPE,
         *,
-        save_path: str | None = None,
+        save_path: str = None,
     ):
         save_path = os.path.join(save_path, "split")
         os.makedirs(save_path, exist_ok=False)
@@ -180,10 +188,19 @@ class ClipVocaSet(Dataset):
         datapath: str,
         phase: Literal["train", "val", "test", "all"] = "all",
         random_shift: bool = False,
+        split_frame: bool = True,
+        normalize_audio: bool = True,
     ):
+        if not split_frame:
+            assert (
+                random_shift is False
+            ), "random_shift is not supported when split_frame is False"
+
         self.phase = phase
         self.random_shift = random_shift
         self.datapath = os.path.abspath(datapath)
+        self.split_frame = split_frame
+        self.normalize_audio = normalize_audio
 
         self.tempalte_verts: Mapping[str, np.ndarray] = load_pickle(
             os.path.join(self.datapath, "templates.pkl")
@@ -209,7 +226,16 @@ class ClipVocaSet(Dataset):
             )
 
         self.split_recorder = DataSplitRecorder.load(self.datapath)
-        self.datalist = self.split_recorder.get_list(phase)
+        self.datalist_raw = self.split_recorder.get_list(phase)
+        if self.split_frame:
+            self.datalist = self.datalist_raw
+        else:
+            unique_datalist = set()
+            for data_info in self.datalist_raw:
+                human_id, sentence_id, audio_index, data_verts_index = data_info
+                unique_datalist.add((human_id, sentence_id))
+            self.datalist = list(unique_datalist)
+
         print(f"Loaded {len(self.datalist)} frame data of phase {self.phase}")
 
     def __repr__(self) -> str:
@@ -232,31 +258,67 @@ class ClipVocaSet(Dataset):
         audio_clip = get_audio_fragment(
             audio, audio_index, fps=60, sample_rate=sr, length=0.52, shift=random_shift
         )
+        if self.normalize_audio:
+            audio_clip = normalize_audio(audio_clip)
 
         return VocaItem(
-            audio=torch.FloatTensor(audio_clip.copy()),
-            verts=torch.FloatTensor(verts.copy()),
-            template_vert=torch.FloatTensor(self.tempalte_verts[human_id].copy()),
-            one_hot=torch.FloatTensor(get_human_id_one_hot(human_id).copy()),
+            audio=audio_clip,
+            verts=verts.astype(np.float32),
+            template_vert=self.tempalte_verts[human_id].astype(np.float32),
+            one_hot=get_human_id_one_hot(human_id).astype(np.float32),
+        )
+
+    def get_whole_clip(self, key) -> VocaItem:
+        human_id, sentence_id = key
+        audio_clip = self.raw_audio[human_id][sentence_id]["audio"]
+        audio_idxs_mapping = self.wav_seq_to_idx[human_id][sentence_id]
+        verts = [self.data_verts[seq_num] for seq_num in audio_idxs_mapping.values()]
+        # resample to 16000
+        if self.normalize_audio:
+            audio_clip = normalize_audio(audio_clip)
+        audio_clip = (
+            torchaudio.functional.resample(torch.from_numpy(audio_clip), 22000, 16000)
+            .numpy()
+            .astype(np.float32)
+        )
+        return VocaItem(
+            audio=audio_clip,
+            verts=np.stack(verts).astype(np.float32),
+            template_vert=self.tempalte_verts[human_id].astype(np.float32),
+            one_hot=get_human_id_one_hot(human_id).astype(np.float32),
         )
 
     def __len__(self):
         return len(self.datalist)
 
     def __getitem__(self, idx):
-        return self.get_single_item(self.datalist[idx])
+        if self.split_frame:
+            return self.get_single_item(self.datalist[idx])
+        else:
+            return self.get_whole_clip(self.datalist[idx])
 
     def get_framedatas(self, target_human_id: str, target_sentence_id: str):
         res = []
-        for data_info in self.datalist:
-            if data_info[0] == target_human_id and data_info[1] == target_sentence_id:
-                res.append(
-                    (
-                        self.get_single_item(data_info),
-                        data_info[2],
+        if self.split_frame:
+            for data_info in self.datalist:
+                if (
+                    data_info[0] == target_human_id
+                    and data_info[1] == target_sentence_id
+                ):
+                    return [self.get_whole_clip(data_info)]
+        else:
+            for data_info in self.datalist:
+                if (
+                    data_info[0] == target_human_id
+                    and data_info[1] == target_sentence_id
+                ):
+                    res.append(
+                        (
+                            self.get_single_item(data_info),
+                            data_info[2],
+                        )
                     )
-                )
-        sorted(res, key=lambda x: x[1])
+            sorted(res, key=lambda x: x[1])
 
         return [x[0] for x in res]
 
@@ -268,22 +330,33 @@ class VocaDataModule(L.LightningDataModule):
         batch_size: int = 32,
         num_workers: int = 4,
         random_shift: bool = False,
+        split_frame: bool = True,
     ):
         super().__init__()
         self.datapath = datapath
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.random_shift = random_shift
+        self.split_frame = split_frame
 
-    def setup(self, stage: str | None = None):
+    def setup(self, stage: str = None):
         self.train_dataset = ClipVocaSet(
-            self.datapath, phase="train", random_shift=self.random_shift
+            self.datapath,
+            phase="train",
+            random_shift=self.random_shift,
+            split_frame=self.split_frame,
         )
         self.val_dataset = ClipVocaSet(
-            self.datapath, phase="val", random_shift=self.random_shift
+            self.datapath,
+            phase="val",
+            random_shift=self.random_shift,
+            split_frame=self.split_frame,
         )
         self.test_dataset = ClipVocaSet(
-            self.datapath, phase="test", random_shift=self.random_shift
+            self.datapath,
+            phase="test",
+            random_shift=self.random_shift,
+            split_frame=self.split_frame,
         )
 
     def train_dataloader(self):
@@ -334,14 +407,19 @@ class AduioParams(TypedDict):
 
 def get_audio_fragment(
     audio: np.ndarray, idx: int, **audio_params: Unpack[AduioParams]
-) -> np.ndarray | None:
+) -> np.ndarray:
+    _audio_dtype = audio.dtype  # keep the original dtype
     l_pad_samples = (
         int(audio_params["sample_rate"] * audio_params["length"] / 2)
         + audio_params["shift"]
     )
     n_pad_samples = int(audio_params["sample_rate"] * audio_params["length"] / 2)
     pad_audio = np.concatenate(
-        [np.zeros(l_pad_samples), audio, np.zeros(2 * n_pad_samples)]
+        [
+            np.zeros(l_pad_samples, dtype=_audio_dtype),
+            audio,
+            np.zeros(2 * n_pad_samples, dtype=_audio_dtype),
+        ]
     )
     start = idx * audio_params["sample_rate"] // audio_params["fps"]
     end = start + n_pad_samples * 2
@@ -353,5 +431,19 @@ def get_audio_fragment(
 
 
 if __name__ == "__main__":
-    dataset = ClipVocaSet("../")
-    print(dataset)
+    import time
+
+    dataset = ClipVocaSet("../", split_frame=False)
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+    for i, data in enumerate(dataloader):
+        tic = time.time()
+        print(data["audio"].shape, data["verts"].shape, data["template_vert"].shape)
+        print(time.time() - tic)
+        break
