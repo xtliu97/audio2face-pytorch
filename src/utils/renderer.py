@@ -126,15 +126,6 @@ def images_to_video(images: list, output: str, fps: int = 60):
         video.write(img)
     video.release()
 
-    # video_fname = os.path.join(output, "video.mp4")
-    # cmd = (
-    #     "ffmpeg"
-    #     + " -i {0} -i {1} -vcodec h264 -ac 1 -channel_layout mono -pix_fmt yuv420p {2}".format(
-    #         f"{output}/audio.wav", tmp_video_filename, video_fname
-    #     )
-    # ).split()
-    # call(cmd)
-
 
 def verts_to_npy(verts: np.ndarray, output: str):
     np.save(output, verts)
