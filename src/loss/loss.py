@@ -1,6 +1,26 @@
 import torch
 
 
+class FaceFormerLoss:
+    def __init__(self) -> None:
+        # self.mse = torch.nn.MSELoss()
+        self.loss = VocaLoss()
+
+    def __call__(self, pred, gt):
+        gt = gt.squeeze(0)
+        pred = pred.squeeze(0)
+        # drop last frame if the number of frames is odd
+        if gt.shape[0] % 2 != 0:
+            gt = gt[:-1]
+            pred = pred[:-1]
+
+        return self.loss(pred, gt)
+
+        # rec_loss = self.mse(pred, gt)
+
+        # return {"loss": rec_loss, "rec_loss": rec_loss}
+
+
 class VocaLoss:
     def __init__(self, k_rec: float = 1.0, k_vel: float = 10.0):
         self.k_rec = k_rec

@@ -6,6 +6,7 @@ import cv2
 import pyrender
 import numpy as np
 from rich.progress import track
+from subprocess import call
 
 from .facemesh import FaceMesh
 
@@ -113,14 +114,35 @@ class Renderer:
 
 
 def images_to_video(images: list, output: str, fps: int = 60):
+    # import tempfile
+
+    # tmp_video_file = tempfile.NamedTemporaryFile("w", suffix=".mp4", dir=output)
+    tmp_video_filename = f"{output}/tmp.mp4"
+    print(f"Writing frames to {tmp_video_filename}...")
     height, width, _ = images[0].shape
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    video = cv2.VideoWriter(output, fourcc, fps, (width, height))
+    video = cv2.VideoWriter(tmp_video_filename, fourcc, fps, (width, height), True)
     for img in track(images, description=f"Writing frames to {output}..."):
         video.write(img)
     video.release()
+
+    # video_fname = os.path.join(output, "video.mp4")
+    # cmd = (
+    #     "ffmpeg"
+    #     + " -i {0} -i {1} -vcodec h264 -ac 1 -channel_layout mono -pix_fmt yuv420p {2}".format(
+    #         f"{output}/audio.wav", tmp_video_filename, video_fname
+    #     )
+    # ).split()
+    # call(cmd)
 
 
 def verts_to_npy(verts: np.ndarray, output: str):
     np.save(output, verts)
     print(f"Saved verts to {output}")
+
+
+def save_audio(audio: np.ndarray, output: str):
+    import soundfile as sf
+
+    audio_fname = os.path.join(output, "audio.wav")
+    sf.write(audio_fname, (audio * 32767).cpu().numpy().astype(np.int16)[0], 16000)

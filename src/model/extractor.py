@@ -3,6 +3,8 @@ import logging
 import torch
 import torchaudio
 from torch import nn
+from torchaudio.functional import resample
+from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
 
 class MFCCExtractor(nn.Module):
@@ -17,8 +19,7 @@ class MFCCExtractor(nn.Module):
         n_mfcc: int,
         out_dim: int,
         win_length: int,
-        n_fft: int | None = None,
-        normalize: bool = False,
+        n_fft: int = None,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -28,7 +29,6 @@ class MFCCExtractor(nn.Module):
         self.hop_length = win_length // 2  # 50% overlap
         self.n_fft = n_fft if n_fft else win_length
         self.T = self._get_extractor()
-        self.normalize = normalize
         self.__running_for_first_time = True
 
     def _get_extractor(self):
@@ -43,8 +43,6 @@ class MFCCExtractor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.normalize:
-            x = x / 32768.0
         x = self.T(x).transpose(1, 2)
         if self.out_dim != x.shape[1]:
             if self.__running_for_first_time:
@@ -52,6 +50,42 @@ class MFCCExtractor(nn.Module):
                     f"MFCCExtractor: Got tensor shape {x.shape}, resizing to {self.out_dim} using bilinear interpolation"
                 )
                 self.__running_for_first_time = False
+            x = torch.nn.functional.interpolate(
+                x.unsqueeze(1), size=(self.out_dim, self.n_mfcc), mode="bilinear"
+            ).squeeze(1)
+        return x
+
+
+class Wav2VecExtractor(nn.Module):
+    def __init__(
+        self,
+        sample_rate: int,
+        n_mfcc,
+        out_dim: int,
+        *args,
+        **kwargs,
+    ):
+        super().__init__()
+        self.ori_sample_rate = sample_rate
+        self.sample_rate = 16000
+        self.out_dim = out_dim
+        self.n_mfcc = n_mfcc
+
+        self.processor = Wav2Vec2Processor.from_pretrained(
+            "facebook/wav2vec2-base-960h"
+        )
+        self.model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
+        self.model.freeze_feature_encoder()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = resample(x, self.ori_sample_rate, self.sample_rate)
+        device = self.model.device
+        x = self.processor(
+            x, return_tensors="pt", padding=True, sampling_rate=self.sample_rate
+        )
+        x = self.model(x.input_values[0].to(device)).last_hidden_state
+        x = x.transpose(1, 2)
+        if self.out_dim != x.shape[1]:
             x = torch.nn.functional.interpolate(
                 x.unsqueeze(1), size=(self.out_dim, self.n_mfcc), mode="bilinear"
             ).squeeze(1)

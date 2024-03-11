@@ -3,33 +3,38 @@ from typing import Literal
 import torch
 import lightning as L
 
-from ..loss import VocaLoss
+from ..loss import FaceFormerLoss, VocaLoss
 from .voca import Voca
 from .audio2face import Audio2Mesh
 from .song2face import Song2Face
-from ..utils.renderer import Renderer, FaceMesh, images_to_video
+from .faceformer import Faceformer
+
+from ..utils.renderer import Renderer, FaceMesh, images_to_video, save_audio
 
 
 class Audio2FaceModel(L.LightningModule):
     def __init__(
         self,
-        model_name: Literal["voca", "audio2mesh", "song2face"],
+        model_name: Literal["voca", "audio2mesh", "song2face", "faceformer"],
         n_verts: int,
         n_onehot: int,
     ):
         super().__init__()
+        self.model_name = model_name
         if model_name == "voca":
             model = Voca
         elif model_name == "audio2mesh":
             model = Audio2Mesh
         elif model_name == "song2face":
             model = Song2Face
+        elif model_name == "faceformer":
+            model = Faceformer
         else:
             raise ValueError(f"Unknown model_name: {model_name}")
         self.model = model(n_verts, n_onehot)
-        self.loss = VocaLoss(k_rec=1.0, k_vel=10)
-        self.lr = 1e-4
-        self.lr_weight_decay = 1e-5
+        self.loss = VocaLoss() if model_name != "faceformer" else FaceFormerLoss()
+        self.lr = 1e-5
+        self.lr_weight_decay = 1e-6
 
         self.training_error = []
         self.validation_error = []
@@ -41,17 +46,25 @@ class Audio2FaceModel(L.LightningModule):
 
         self.save_hyperparameters()
 
+    @torch.no_grad()
+    def mse_error(self, pred, gt):
+        pred = pred.view(-1, 5023 * 3)
+        gt = gt.view(-1, 5023 * 3)
+        with torch.no_grad():
+            a = torch.mean((pred - gt) ** 2, axis=1)
+            return torch.mean(a)
+
     def on_train_epoch_end(self):
-        epoch_rec_loss = sum(self.training_error) / len(self.training_error)
-        self.log("train/err", epoch_rec_loss, on_epoch=True)
-        print(f"Epoch {self.current_epoch} rec_loss: {epoch_rec_loss}")
-        self.training_error = []
+        epoch_err = sum(self.training_error) / len(self.training_error)
+        self.log("train/err", epoch_err, on_epoch=True)
+        print(f"Epoch {self.current_epoch} train err: {epoch_err}")
+        self.training_error.clear()
 
     def on_validation_epoch_end(self):
-        epoch_rec_loss = sum(self.validation_error) / len(self.validation_error)
-        self.log("val/err", epoch_rec_loss, on_epoch=True)
-        print(f"Epoch {self.current_epoch} val_rec_loss: {epoch_rec_loss}")
-        self.validation_error = []
+        epoch_err = sum(self.validation_error) / len(self.validation_error)
+        self.log("val/err", epoch_err, on_epoch=True)
+        print(f"Epoch {self.current_epoch} val error: {epoch_err}")
+        self.validation_error.clear()
 
     def unpack_batch(self, batch):
         batch["verts"] = batch["verts"] * 100
@@ -59,34 +72,54 @@ class Audio2FaceModel(L.LightningModule):
         return batch["audio"], batch["one_hot"], batch["verts"], batch["template_vert"]
 
     def training_step(self, batch, batch_idx):
+        # empty the cache
+        torch.cuda.empty_cache()
         x, one_hot, gt, template = self.unpack_batch(batch)
         pred = self.model(x, one_hot, template)
         loss = self.loss(pred, gt)
         self.log_dict(loss, on_epoch=False, on_step=True, prog_bar=True)
-        self.training_error.append(loss["rec_loss"].item())
+
+        err = self.mse_error(pred, gt)
+        self.training_error.append(err.item())
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, one_hot, gt, template = self.unpack_batch(batch)
-        pred = self.model(x, one_hot, template)
+        pred = self.model.predict(x, one_hot, template)
         loss = self.loss(pred, gt)
         self.log_dict(loss, on_epoch=False, on_step=True, prog_bar=True)
-        self.validation_error.append(loss["rec_loss"].item())
-        self.validation_pred_verts.append(pred / 100)
-        self.validation_gt_verts.append(gt / 100)
+
+        err = self.mse_error(pred, gt)
+        self.validation_error.append(err.item())
+        # self.validation_pred_verts.append(pred / 100)
+        # self.validation_gt_verts.append(gt / 100)
 
     def on_validation_end(self):
+        return
+        if self.model_name == "faceformer":
+            self.validation_pred_verts = [
+                item.squeeze(0) for item in self.validation_pred_verts
+            ]
+            self.validation_gt_verts = [
+                item.squeeze(0) for item in self.validation_gt_verts
+            ]
+
         predicted_verts = torch.cat(self.validation_pred_verts, axis=0)
         gt_verts = torch.cat(self.validation_gt_verts, axis=0)
-        self.validation_pred_verts = []
-        self.validation_gt_verts = []
+        self.validation_pred_verts.clear()
+        self.validation_gt_verts.clear()
 
         # select one sample to log
         random_idx = torch.randint(0, predicted_verts.shape[0], (1,))
-
-        renderer = self.get_renderer()
-        rendered_image = renderer.render(predicted_verts[random_idx].cpu().numpy())[0]
-        gt_image = renderer.render(gt_verts[random_idx].cpu().numpy())[0]
+        try:
+            renderer = self.get_renderer()
+            rendered_image = renderer.render(predicted_verts[random_idx].cpu().numpy())[
+                0
+            ]
+            gt_image = renderer.render(gt_verts[random_idx].cpu().numpy())[0]
+        except Exception as e:
+            print("Failed to render image", e)
+            return
 
         if self.logger:
             self.logger.experiment.add_image(
@@ -104,11 +137,14 @@ class Audio2FaceModel(L.LightningModule):
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
         x, one_hot, gt, template = self.unpack_batch(batch)
-        pred = self.model(x, one_hot, template)
-        self.predict_error.append(
-            torch.mean(torch.sum((pred - gt) ** 2, axis=2)).item()
-        )
-        self.predicted_verts.append(pred / 100)
+        pred = self.model.predict(x, one_hot, template)
+        self.predict_error.append(self.mse_error(pred, gt).item())
+        for item in pred:
+            if self.model_name == "faceformer":
+                self.predicted_verts.append(item / 100)
+            else:
+                self.predicted_verts.append(item.unsqueeze(0) / 100)
+        self.predicted_audio = x
         return pred
 
     def get_renderer(self):
@@ -120,13 +156,14 @@ class Audio2FaceModel(L.LightningModule):
         # err
         epoch_rec_loss = sum(self.predict_error) / len(self.predict_error)
         print(f"Epoch {self.current_epoch} predict_rec_loss: {epoch_rec_loss}")
-        self.predict_error = []
+        self.predict_error.clear()
 
         # render video
         renderer = self.get_renderer()
         predicted_verts = torch.cat(self.predicted_verts, axis=0)
-        self.predicted_verts = []
+        self.predicted_verts.clear()
 
         rendered_image = renderer.render(predicted_verts.cpu().numpy())
 
-        images_to_video(rendered_image, f"{self.logger.log_dir}/best_ckpt.mp4")
+        save_audio(self.predicted_audio, self.logger.log_dir)
+        images_to_video(rendered_image, self.logger.log_dir)

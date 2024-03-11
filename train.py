@@ -1,5 +1,6 @@
 import os
 
+import torch
 import lightning as L
 from lightning.pytorch.callbacks import (
     ModelCheckpoint,
@@ -7,27 +8,42 @@ from lightning.pytorch.callbacks import (
     TQDMProgressBar as ProgressBar,
     # DeviceStatsMonitor,
 )
+from lightning.pytorch.loggers import TensorBoardLogger
 
 from src.dataset.vocaset import VocaDataModule
 from src.model.lightning_model import Audio2FaceModel
 
 
 if __name__ == "__main__":
-    train_batch_size = 512
-    val_batch_size = 256
-
     # torch.multiprocessing.set_start_method("spawn")
-    # torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("medium")
 
+    # training parameters
     dataset_path = os.getcwd() + "/.."
+    batch_size = 64
+    modelname = "audio2mesh"
+    vertex_count = 5023 * 3
+    one_hot_size = 12
+    split_frame = True
+    percision = "16-mixed"
+
+    is_transformer = modelname == "faceformer"
+    if is_transformer:
+        split_frame = False
+        batch_size = 1
+
     voca_datamodule = VocaDataModule(
         dataset_path,
-        batch_size=train_batch_size,
+        batch_size=batch_size,
         num_workers=8,
+        split_frame=split_frame,
     )
 
-    model = Audio2FaceModel("audio2mesh", 5023 * 3, 12)
+    # Train
+    model = Audio2FaceModel(modelname, vertex_count, one_hot_size)
     trainer = L.Trainer(
+        precision=percision,
+        logger=TensorBoardLogger("logs", name=modelname),
         callbacks=[
             ModelCheckpoint(monitor="val/err", save_last=True),
             EarlyStopping(monitor="val/err", patience=5),
@@ -40,6 +56,7 @@ if __name__ == "__main__":
 
     model = Audio2FaceModel.load_from_checkpoint(
         f"{trainer.log_dir}/checkpoints/last.ckpt"
+        # "/home/lixiang/lxt/VOCA-Pytorch/logs/faceformer/version_1/checkpoints/epoch=5-step=1884.ckpt"
     )
 
     # inference only

@@ -1,3 +1,3 @@
-from .loss import VocaLoss
+from .loss import VocaLoss, FaceFormerLoss
 
-__all__ = ["VocaLoss"]
+__all__ = ["VocaLoss", "FaceFormerLoss"]
