@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .extractor import MFCCExtractor
+from .extractor import MFCCExtractor, Wav2VecExtractor
 
 
 class Audio2Mesh(nn.Module):
@@ -64,7 +64,7 @@ class Audio2Mesh(nn.Module):
             nn.Linear(50, n_verts),
         )
 
-    def forward(self, x, one_hot, template):
+    def forward(self, x, one_hot, template, **kwargs):
         bs = x.size(0)
         x = self.wav2feature(x)
         onehot_embedding = one_hot.repeat(1, 32).view(bs, 1, -1, 32)
@@ -75,3 +75,6 @@ class Audio2Mesh(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.output_net(torch.cat((x, one_hot), 1))
         return x.view(bs, -1, 3) + template
+
+    def predict(self, x, one_hot, template, **kwargs):
+        return self(x, one_hot, template, **kwargs)

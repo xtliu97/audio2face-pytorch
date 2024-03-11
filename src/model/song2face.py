@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from extractor import MFCCExtractor
+from .extractor import MFCCExtractor
 
 
 class Song2Face(nn.Module):
@@ -47,7 +47,7 @@ class Song2Face(nn.Module):
             conv_bn(162, 243, (1, 3), (1, 2), (0, 1)),
             conv_bn(243, 256, (1, 3), (1, 2), (0, 1)),
         )
-        self.vocal_encoder_lstm1 = bi_lstm(256, 256)
+        self.vocal_encoder_lstm1 = bi_lstm(64, 256)
         self.vocal_encoder_lstm2 = bi_lstm(256, 256)
 
         self.output_net = nn.Sequential(

@@ -38,7 +38,7 @@ class Voca(nn.Module):
             nn.Linear(50, n_verts),
         )
 
-    def forward(self, x, one_hot, template):
+    def forward(self, x, one_hot, template, **kwargs):
         bs = x.size(0)
         one_hot = one_hot[:, :8]
         x = self.feature_extractor(x)
@@ -50,3 +50,6 @@ class Voca(nn.Module):
         x = torch.concat([x.view(bs, -1), one_hot], 1)  # [bs, 64 + 8]
         x = self.decoder(x)
         return x.view(bs, -1, 3) + template
+
+    def predict(self, x, one_hot, template, **kwargs):
+        return self(x, one_hot, template, **kwargs)

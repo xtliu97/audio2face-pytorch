@@ -305,13 +305,6 @@ class ClipVocaSet(Dataset):
                     data_info[0] == target_human_id
                     and data_info[1] == target_sentence_id
                 ):
-                    return [self.get_whole_clip(data_info)]
-        else:
-            for data_info in self.datalist:
-                if (
-                    data_info[0] == target_human_id
-                    and data_info[1] == target_sentence_id
-                ):
                     res.append(
                         (
                             self.get_single_item(data_info),
@@ -319,6 +312,13 @@ class ClipVocaSet(Dataset):
                         )
                     )
             sorted(res, key=lambda x: x[1])
+        else:
+            for data_info in self.datalist:
+                if (
+                    data_info[0] == target_human_id
+                    and data_info[1] == target_sentence_id
+                ):
+                    return [self.get_whole_clip(data_info)]
 
         return [x[0] for x in res]
 
