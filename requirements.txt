@@ -1,0 +1,8 @@
+librosa
+rich
+pandas
+lightning
+opencv-python
+pyrender
+tensorboard
+numpy

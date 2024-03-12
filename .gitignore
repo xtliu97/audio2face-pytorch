@@ -172,3 +172,4 @@ old/
 clipdata/
 lightning_logs/
 .flake8
+*.ipynb

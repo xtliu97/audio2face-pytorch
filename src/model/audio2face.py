@@ -18,7 +18,6 @@ class Audio2Mesh(nn.Module):
             out_dim=52,
             win_length=220 * 2,
             n_fft=1024,
-            normalize=True,
         )
         self.analysis_net = nn.Sequential(
             nn.Conv2d(1, 72, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),

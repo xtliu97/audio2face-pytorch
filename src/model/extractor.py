@@ -19,6 +19,7 @@ class MFCCExtractor(nn.Module):
         n_mfcc: int,
         out_dim: int,
         win_length: int,
+        hop_length: int = None,
         n_fft: int = None,
     ):
         super().__init__()
@@ -26,8 +27,10 @@ class MFCCExtractor(nn.Module):
         self.n_mfcc = n_mfcc
         self.out_dim = out_dim
         self.win_length = win_length
-        self.hop_length = win_length // 2  # 50% overlap
-        self.n_fft = n_fft if n_fft else win_length
+        self.hop_length = (
+            hop_length if hop_length else win_length // 2
+        )  # default hop_length is half of win_length
+        self.n_fft = n_fft if n_fft else win_length  # default n_fft is win_length
         self.T = self._get_extractor()
         self.__running_for_first_time = True
 
