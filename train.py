@@ -20,17 +20,24 @@ if __name__ == "__main__":
 
     # training parameters
     dataset_path = os.getcwd() + "/.."
-    batch_size = 64
-    modelname = "audio2mesh"
+    batch_size = 128
+    modelname = "af_model"
     vertex_count = 5023 * 3
     one_hot_size = 12
     split_frame = True
     percision = "16-mixed"
+    lr = 1e-4
+    feature_extractor = "wav2vec"
+    sample_rate = 22000
+    n_feature = 32
+    out_dim = 52
+    win_length = 220 * 2
 
     is_transformer = modelname == "faceformer"
     if is_transformer:
         split_frame = False
         batch_size = 1
+        feature_extractor = None
 
     voca_datamodule = VocaDataModule(
         dataset_path,
@@ -39,13 +46,26 @@ if __name__ == "__main__":
         split_frame=split_frame,
     )
 
+    version = f"{modelname}/{feature_extractor}-{lr}"
+
     # Train
-    model = Audio2FaceModel(modelname, vertex_count, one_hot_size)
+    model = Audio2FaceModel(
+        modelname,
+        feature_extractor,
+        vertex_count,
+        one_hot_size,
+        n_feature=n_feature,
+        out_dim=out_dim,
+        win_length=win_length,
+        lr=lr,
+    )
+
     trainer = L.Trainer(
         precision=percision,
-        logger=TensorBoardLogger("logs", name=modelname),
+        log_every_n_steps=10,
+        logger=TensorBoardLogger("logs", name=version),
         callbacks=[
-            ModelCheckpoint(monitor="val/err", save_last=True),
+            ModelCheckpoint(monitor="val/err", save_last=False),
             EarlyStopping(monitor="val/err", patience=5),
             ProgressBar(),
             # DeviceStatsMonitor(),
@@ -54,9 +74,11 @@ if __name__ == "__main__":
     )
     trainer.fit(model, datamodule=voca_datamodule)
 
+    ckpts = os.listdir(trainer.log_dir + "/checkpoints")
+    sorted_ckpts = sorted(ckpts, key=lambda x: int(x.split("=")[-1].split(".")[0]))
+
     model = Audio2FaceModel.load_from_checkpoint(
-        f"{trainer.log_dir}/checkpoints/last.ckpt"
-        # "/home/lixiang/lxt/VOCA-Pytorch/logs/faceformer/version_1/checkpoints/epoch=5-step=1884.ckpt"
+        trainer.log_dir + "/checkpoints/" + sorted_ckpts[-1]
     )
 
     # inference only

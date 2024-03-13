@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from .extractor import MFCCExtractor, Wav2VecExtractor
-
 
 class Audio2Mesh(nn.Module):
     """https://research.nvidia.com/sites/default/files/publications/karras2017siggraph-paper_0.pdf"""
@@ -12,13 +10,6 @@ class Audio2Mesh(nn.Module):
         self.n_verts = n_verts
         self.n_onehot = n_onehot
 
-        self.wav2feature = MFCCExtractor(
-            sample_rate=22000,
-            n_mfcc=32,
-            out_dim=52,
-            win_length=220 * 2,
-            n_fft=1024,
-        )
         self.analysis_net = nn.Sequential(
             nn.Conv2d(1, 72, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1)),
             nn.BatchNorm2d(72),
@@ -65,7 +56,6 @@ class Audio2Mesh(nn.Module):
 
     def forward(self, x, one_hot, template, **kwargs):
         bs = x.size(0)
-        x = self.wav2feature(x)
         onehot_embedding = one_hot.repeat(1, 32).view(bs, 1, -1, 32)
         x = x.unsqueeze(1)
         # x = self.instance_norm(x)

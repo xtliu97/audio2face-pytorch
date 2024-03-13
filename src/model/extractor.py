@@ -16,7 +16,7 @@ class MFCCExtractor(nn.Module):
     def __init__(
         self,
         sample_rate: int,
-        n_mfcc: int,
+        n_feature: int,
         out_dim: int,
         win_length: int,
         hop_length: int = None,
@@ -24,7 +24,7 @@ class MFCCExtractor(nn.Module):
     ):
         super().__init__()
         self.sample_rate = sample_rate
-        self.n_mfcc = n_mfcc
+        self.n_mfcc = n_feature
         self.out_dim = out_dim
         self.win_length = win_length
         self.hop_length = (
@@ -46,6 +46,7 @@ class MFCCExtractor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
         x = self.T(x).transpose(1, 2)
         if self.out_dim != x.shape[1]:
             if self.__running_for_first_time:
@@ -63,7 +64,7 @@ class Wav2VecExtractor(nn.Module):
     def __init__(
         self,
         sample_rate: int,
-        n_mfcc,
+        n_feature: int,
         out_dim: int,
         *args,
         **kwargs,
@@ -72,7 +73,7 @@ class Wav2VecExtractor(nn.Module):
         self.ori_sample_rate = sample_rate
         self.sample_rate = 16000
         self.out_dim = out_dim
-        self.n_mfcc = n_mfcc
+        self.n_feature = n_feature
 
         self.processor = Wav2Vec2Processor.from_pretrained(
             "facebook/wav2vec2-base-960h"
@@ -90,6 +91,6 @@ class Wav2VecExtractor(nn.Module):
         x = x.transpose(1, 2)
         if self.out_dim != x.shape[1]:
             x = torch.nn.functional.interpolate(
-                x.unsqueeze(1), size=(self.out_dim, self.n_mfcc), mode="bilinear"
+                x.unsqueeze(1), size=(self.out_dim, self.n_feature), mode="bilinear"
             ).squeeze(1)
         return x

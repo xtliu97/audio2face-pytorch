@@ -8,6 +8,8 @@ from .voca import Voca
 from .audio2face import Audio2Mesh
 from .song2face import Song2Face
 from .faceformer import Faceformer
+from .af_model import AFModel
+from .extractor import MFCCExtractor, Wav2VecExtractor
 
 from ..utils.renderer import Renderer, FaceMesh, images_to_video, save_audio
 
@@ -15,9 +17,13 @@ from ..utils.renderer import Renderer, FaceMesh, images_to_video, save_audio
 class Audio2FaceModel(L.LightningModule):
     def __init__(
         self,
-        model_name: Literal["voca", "audio2mesh", "song2face", "faceformer"],
+        model_name: Literal[
+            "voca", "audio2mesh", "song2face", "faceformer", "af_model"
+        ],
+        feature_extractor: Literal["mfcc", "wav2vec"],
         n_verts: int,
         n_onehot: int,
+        **config,
     ):
         super().__init__()
         self.model_name = model_name
@@ -29,12 +35,34 @@ class Audio2FaceModel(L.LightningModule):
             model = Song2Face
         elif model_name == "faceformer":
             model = Faceformer
+        elif model_name == "af_model":
+            model = AFModel
         else:
             raise ValueError(f"Unknown model_name: {model_name}")
+        # fe
+        if feature_extractor == "mfcc":
+            fe = MFCCExtractor
+        elif feature_extractor == "wav2vec":
+            fe = Wav2VecExtractor
+        elif feature_extractor is None:
+            fe = lambda *args, **kwargs: None  # noqa
+        else:
+            raise ValueError(f"Unknown feature_extractor: {feature_extractor}")
+
+        self.feature_extractor = fe(
+            sample_rate=22000,
+            n_feature=config.get("n_feature"),
+            out_dim=config.get("out_dim"),
+            win_length=config.get("win_length"),
+            hop_length=config.get("hop_length", None),
+            n_fft=1024,
+        )
+
+        # model
         self.model = model(n_verts, n_onehot)
         self.loss = VocaLoss() if model_name != "faceformer" else FaceFormerLoss()
-        self.lr = 1e-5
-        self.lr_weight_decay = 1e-6
+        self.lr = config.get("lr", 1e-5)
+        self.lr_weight_decay = self.lr / 10
 
         self.training_error = []
         self.validation_error = []
@@ -46,6 +74,14 @@ class Audio2FaceModel(L.LightningModule):
 
         self.save_hyperparameters()
 
+    def forward(self, x, one_hot, template, **kwargs):
+        if self.feature_extractor is None:
+            return self.model(x, one_hot, template, **kwargs)
+
+        feature = self.feature_extractor(x).detach()
+        pred_verts = self.model(feature, one_hot, template, **kwargs)
+        return pred_verts
+
     @torch.no_grad()
     def mse_error(self, pred, gt):
         pred = pred.view(-1, 5023 * 3)
@@ -56,13 +92,19 @@ class Audio2FaceModel(L.LightningModule):
 
     def on_train_epoch_end(self):
         epoch_err = sum(self.training_error) / len(self.training_error)
-        self.log("train/err", epoch_err, on_epoch=True)
+        self.log("train/err", epoch_err, on_epoch=True, on_step=False)
+        self.logger.experiment.add_scalar(
+            "train/epock/err", epoch_err, self.current_epoch
+        )
         print(f"Epoch {self.current_epoch} train err: {epoch_err}")
         self.training_error.clear()
 
     def on_validation_epoch_end(self):
         epoch_err = sum(self.validation_error) / len(self.validation_error)
-        self.log("val/err", epoch_err, on_epoch=True)
+        self.log("val/err", epoch_err, on_epoch=True, on_step=False)
+        self.logger.experiment.add_scalar(
+            "val/epock/err", epoch_err, self.current_epoch
+        )
         print(f"Epoch {self.current_epoch} val error: {epoch_err}")
         self.validation_error.clear()
 
@@ -75,9 +117,10 @@ class Audio2FaceModel(L.LightningModule):
         # empty the cache
         torch.cuda.empty_cache()
         x, one_hot, gt, template = self.unpack_batch(batch)
-        pred = self.model(x, one_hot, template)
+        pred = self(x, one_hot, template)
         loss = self.loss(pred, gt)
-        self.log_dict(loss, on_epoch=False, on_step=True, prog_bar=True)
+        if self.global_step % 10 == 0:
+            self.log_dict(loss, on_epoch=False, on_step=True, prog_bar=True)
 
         err = self.mse_error(pred, gt)
         self.training_error.append(err.item())
@@ -85,7 +128,7 @@ class Audio2FaceModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, one_hot, gt, template = self.unpack_batch(batch)
-        pred = self.model.predict(x, one_hot, template)
+        pred = self(x, one_hot, template)
         loss = self.loss(pred, gt)
         self.log_dict(loss, on_epoch=False, on_step=True, prog_bar=True)
 
@@ -137,7 +180,7 @@ class Audio2FaceModel(L.LightningModule):
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
         x, one_hot, gt, template = self.unpack_batch(batch)
-        pred = self.model.predict(x, one_hot, template)
+        pred = self(x, one_hot, template)
         self.predict_error.append(self.mse_error(pred, gt).item())
         for item in pred:
             if self.model_name == "faceformer":

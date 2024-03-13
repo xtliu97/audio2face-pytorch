@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from .audio2face import MFCCExtractor
-
 
 class Voca(nn.Module):
     def __init__(self, n_verts: int, n_onehot: int):
@@ -10,14 +8,13 @@ class Voca(nn.Module):
         self.n_verts = n_verts
         self.n_onehot = n_onehot
 
-        self.feature_extractor = MFCCExtractor(
-            sample_rate=22000,
-            n_mfcc=16,
-            out_dim=29,
-            win_length=395 * 2,
-            n_fft=2048,
-            normalize=True,
-        )
+        # self.feature_extractor = MFCCExtractor(
+        #     sample_rate=22000,
+        #     n_mfcc=16,
+        #     out_dim=29,
+        #     win_length=395 * 2,
+        #     n_fft=2048,
+        # )
 
         self.time_conv = nn.Sequential(
             nn.Conv2d(37, 32, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0)),
@@ -41,9 +38,9 @@ class Voca(nn.Module):
     def forward(self, x, one_hot, template, **kwargs):
         bs = x.size(0)
         one_hot = one_hot[:, :8]
-        x = self.feature_extractor(x)
         onehot_embedding = one_hot.repeat(1, 16).view(bs, 1, -1, 16)
         x = x.unsqueeze(1)
+        print(x.shape, onehot_embedding.shape)
         x = torch.cat((x, onehot_embedding), 2)  # [bs, 1, 37, 16]
         x = x.permute(0, 2, 3, 1)  # [bs, 37, 16,1]
         x = self.time_conv(x)

@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from .extractor import MFCCExtractor
-
 
 class Song2Face(nn.Module):
     """https://research.nvidia.com/sites/default/files/publications/karras2017siggraph-paper_0.pdf"""
@@ -11,15 +9,6 @@ class Song2Face(nn.Module):
         super().__init__()
         self.n_verts = n_verts
         self.n_onehot = n_onehot
-
-        self.wav2feature = MFCCExtractor(
-            sample_rate=22000,
-            n_mfcc=32,
-            out_dim=52,
-            win_length=220 * 2,
-            n_fft=1024,
-            normalize=True,
-        )
 
         def conv_bn(in_channels, out_channels, kernel_size, stride, padding, bn=True):
             models = [
@@ -69,7 +58,6 @@ class Song2Face(nn.Module):
 
     def forward(self, x, one_hot, template):
         bs = x.size(0)
-        x = self.wav2feature(x)
         onehot_embedding = one_hot.repeat(1, 32).view(bs, 1, -1, 32)
         x = x.unsqueeze(1)
         x = torch.cat((x, onehot_embedding), 2)
