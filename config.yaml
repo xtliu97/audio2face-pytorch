@@ -1,0 +1,12 @@
+batch_size: 128
+modelname: "audio2mesh"
+vertex_count: 15069 #5023 * 3
+one_hot_size: 12
+split_frame: True
+percision: "16-mixed"
+lr: 1e-4
+feature_extractor: "mfcc"
+sample_rate: 22000
+n_feature: 32
+out_dim: 52
+win_length: 440 #220*2

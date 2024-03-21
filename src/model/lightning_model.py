@@ -1,7 +1,10 @@
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
+import yaml
 import lightning as L
+from pydantic import BaseModel
+
 
 from ..loss import FaceFormerLoss, VocaLoss
 from .voca import Voca
@@ -14,54 +17,85 @@ from .extractor import MFCCExtractor, Wav2VecExtractor
 from ..utils.renderer import Renderer, FaceMesh, images_to_video, save_audio
 
 
+class ExpConfig(BaseModel):
+    # dataset
+    batch_size: int
+    # model
+    modelname: str
+    one_hot_size: int
+    feature_extractor: str
+    sample_rate: int
+    vertex_count: int
+    split_frame: bool
+    n_feature: int
+    out_dim: int
+    win_length: int
+    hop_length: Optional[int] = None
+    # training
+    percision: str
+    lr: float
+    # loss
+    loss: Optional[str] = None
+
+    @classmethod
+    def from_yaml(cls, path: str):
+        with open(path, "r") as f:
+            config = yaml.safe_load(f)
+        return cls(**config)
+
+    def name(self):
+        return f"{self.modelname}_{self.feature_extractor}_{self.lr}_{self.loss}_{self.percision}"
+
+
+def get_model(modelname: Literal["voca", "audio2mesh", "song2face", "faceformer", "af_model"]):
+    model_map = {
+        "voca": Voca,
+        "audio2mesh": Audio2Mesh,
+        "song2face": Song2Face,
+        "faceformer": Faceformer,
+        "af_model": AFModel,
+    }
+    return model_map[modelname]
+
+
+def get_extractor(extractor: Literal["mfcc", "wav2vec"]):
+    extractor_map = {
+        "mfcc": MFCCExtractor,
+        "wav2vec": Wav2VecExtractor,
+        None: lambda *args, **kwargs: None  # noqa
+    }
+    return extractor_map[extractor]
+
+
+def get_loss_fn(modelname: str):
+    if modelname == "faceformer":
+        return FaceFormerLoss()
+    return VocaLoss()
+
+
 class Audio2FaceModel(L.LightningModule):
     def __init__(
-        self,
-        model_name: Literal[
-            "voca", "audio2mesh", "song2face", "faceformer", "af_model"
-        ],
-        feature_extractor: Literal["mfcc", "wav2vec"],
-        n_verts: int,
-        n_onehot: int,
-        **config,
+        self, config: ExpConfig
     ):
         super().__init__()
-        self.model_name = model_name
-        if model_name == "voca":
-            model = Voca
-        elif model_name == "audio2mesh":
-            model = Audio2Mesh
-        elif model_name == "song2face":
-            model = Song2Face
-        elif model_name == "faceformer":
-            model = Faceformer
-        elif model_name == "af_model":
-            model = AFModel
-        else:
-            raise ValueError(f"Unknown model_name: {model_name}")
+        self.model_name = config.modelname
+        model = get_model(config.modelname)
         # fe
-        if feature_extractor == "mfcc":
-            fe = MFCCExtractor
-        elif feature_extractor == "wav2vec":
-            fe = Wav2VecExtractor
-        elif feature_extractor is None:
-            fe = lambda *args, **kwargs: None  # noqa
-        else:
-            raise ValueError(f"Unknown feature_extractor: {feature_extractor}")
-
+        self.fe_name = config.feature_extractor
+        fe = get_extractor(config.feature_extractor)
         self.feature_extractor = fe(
-            sample_rate=22000,
-            n_feature=config.get("n_feature"),
-            out_dim=config.get("out_dim"),
-            win_length=config.get("win_length"),
-            hop_length=config.get("hop_length", None),
+            sample_rate=config.sample_rate,
+            n_feature=config.n_feature,
+            out_dim=config.out_dim,
+            win_length=config.win_length,
+            hop_length=config.hop_length,
             n_fft=1024,
         )
 
         # model
-        self.model = model(n_verts, n_onehot)
-        self.loss = VocaLoss() if model_name != "faceformer" else FaceFormerLoss()
-        self.lr = config.get("lr", 1e-5)
+        self.model = model(n_verts=config.vertex_count, n_onehot=config.one_hot_size)
+        self.loss = get_loss_fn(config.modelname) if config.loss is None else config.loss
+        self.lr = config.lr
         self.lr_weight_decay = self.lr / 10
 
         self.training_error = []
@@ -94,7 +128,7 @@ class Audio2FaceModel(L.LightningModule):
         epoch_err = sum(self.training_error) / len(self.training_error)
         self.log("train/err", epoch_err, on_epoch=True, on_step=False)
         self.logger.experiment.add_scalar(
-            "train/epock/err", epoch_err, self.current_epoch
+            "train_epock/err", epoch_err, self.current_epoch
         )
         print(f"Epoch {self.current_epoch} train err: {epoch_err}")
         self.training_error.clear()
@@ -103,7 +137,7 @@ class Audio2FaceModel(L.LightningModule):
         epoch_err = sum(self.validation_error) / len(self.validation_error)
         self.log("val/err", epoch_err, on_epoch=True, on_step=False)
         self.logger.experiment.add_scalar(
-            "val/epock/err", epoch_err, self.current_epoch
+            "val_epock/err", epoch_err, self.current_epoch
         )
         print(f"Epoch {self.current_epoch} val error: {epoch_err}")
         self.validation_error.clear()
